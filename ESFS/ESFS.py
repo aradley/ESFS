@@ -1059,10 +1059,14 @@ def Parallel_Replace_Clust(N,Chosen_Pairwise_ESSs,Chosen_Clusts,Current_Score,Ma
 def knn_Smooth_Gene_Expression(adata, Use_Genes, knn=30, metric='correlation', log_scale=False):
     #
     print("Calculating pairwise cell-cell distance matrix. Distance metric = " + metric + ", knn = " + str(knn))
-    distmat = squareform(pdist(adata[:,Use_Genes].X, metric))
+    if issparse(adata.X) == True:
+        distmat = squareform(pdist(adata[:,Use_Genes].X.A, metric))
+        Smoothed_Expression = adata.X.A.copy()
+    else:
+        distmat = squareform(pdist(adata[:,Use_Genes].X, metric))
+        Smoothed_Expression = adata.X.copy()
     neighbors = np.sort(np.argsort(distmat, axis=1)[:, 0:knn])
     #
-    Smoothed_Expression = adata.X.copy()
     if log_scale == True:
         Smoothed_Expression = np.log2(Smoothed_Expression+1)
     #
@@ -1147,6 +1151,7 @@ def Plot_Top_Ranked_Genes_UMAP(adata,Top_Ranked_Genes,Clustering="None",Known_Im
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         Gene_Embedding = umap.UMAP(n_neighbors=UMAP_Neighbours, min_dist=UMAP_min_dist, n_components=2, random_state=42).fit_transform(Masked_ESSs)
+        # Gene_Embedding = umap.UMAP(n_neighbors=UMAP_Neighbours, min_dist=UMAP_min_dist, n_components=2).fit_transform(Masked_ESSs)
     ##
     # No clustering
     if Clustering == "None":
@@ -1218,7 +1223,8 @@ def Get_Gene_Cluster_Cell_UMAPs(adata,Gene_Clust_Labels,Top_ESS_Genes,n_neighbor
         if log_transformed == True:
             Reduced_Input_Data = np.log2(Reduced_Input_Data+1)
         #
-        Embedding_Model = umap.UMAP(n_neighbors=n_neighbors, metric="correlation",min_dist=min_dist,n_components=2,random_state=42).fit(Reduced_Input_Data)
+        # Embedding_Model = umap.UMAP(n_neighbors=n_neighbors, metric="correlation",min_dist=min_dist,n_components=2,random_state=42).fit(Reduced_Input_Data)
+        Embedding_Model = umap.UMAP(n_neighbors=n_neighbors, metric="correlation",min_dist=min_dist,n_components=2).fit(Reduced_Input_Data)
         Embedding = Embedding_Model.embedding_
         Gene_Cluster_Embeddings[i] = Embedding
         #
