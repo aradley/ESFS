@@ -32,13 +32,14 @@ from scipy.spatial.distance import pdist, squareform
 # outlined in Radley et al. 2023 for any pair of features. The below code takes an anndata object as an input, calculates the
 # requested ES metrics against each variable/feature in the adata object, and adds them as an attribute to the object for later use.
 
+
 def Create_Scaled_Matrix(adata,clip_percentile=97.5,log_scale=False):
     """
     Prior to calculates ES metrics, the data will be scaled to have values
     between 0 and 1. 
     """
     # Filter genes with no expression
-    Keep_Genes = np.where(np.sum(adata.X != 0,axis=0) > 0)[0]
+    Keep_Genes = Keep_Genes = adata.var_names[np.where(adata.X.getnnz(axis=0) > 50)[0]]
     if Keep_Genes.shape[0] < adata.shape[1]:
         print(str(adata.shape[1] - Keep_Genes.shape[0]) + " genes show no expression. Removing them from adata object")
         adata = adata[:,Keep_Genes]
@@ -1219,7 +1220,7 @@ def Get_Gene_Cluster_Cell_UMAPs(adata,Gene_Clust_Labels,Top_ESS_Genes,n_neighbor
         Selected_Genes = np.asarray(Top_ESS_Genes[np.where(np.isin(Gene_Clust_Labels,Unique_Gene_Clust_Labels[i]))[0]])
         Gene_Cluster_Selected_Genes[i] = Selected_Genes
         # np.save(path + "Saved_ESFS_Genes.npy",np.asarray(Selected_Genes))
-        Reduced_Input_Data = adata[:,Selected_Genes].X
+        Reduced_Input_Data = adata[:,Selected_Genes].X.A
         if log_transformed == True:
             Reduced_Input_Data = np.log2(Reduced_Input_Data+1)
         #
