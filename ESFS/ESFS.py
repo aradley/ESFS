@@ -236,15 +236,17 @@ def nanmaximum(arr1, arr2):
         ndarray: Element-wise maximum of arr1 and arr2, ignoring NaN values.
     """
     # Replace all inf and -inf values with -inf for both arrays
-    arr1 = np.where(np.isinf(arr1), -np.inf, arr1)
-    arr2 = np.where(np.isinf(arr2), -np.inf, arr2)
+    arr1[np.isinf(arr1)] = -np.inf
+    arr2[np.isinf(arr2)] = -np.inf
     # Replace NaN values with -infinity for comparison
-    arr1_nan = np.where(np.isnan(arr1), -np.inf, arr1)
-    arr2_nan = np.where(np.isnan(arr2), -np.inf, arr2)
+    arr1_nan = np.isnan(arr1)
+    arr2_nan = np.isnan(arr2)
+    arr1[arr1_nan] = -np.inf
+    arr2[arr2_nan] = -np.inf
     # Compute the element-wise maximum
-    result = np.maximum(arr1_nan, arr2_nan)
+    result = np.maximum(arr1, arr2)
     # Where both values are NaN, the result should be NaN
-    nan_mask = np.isnan(arr1) & np.isnan(arr2)
+    nan_mask = arr1_nan & arr2_nan
     result[nan_mask] = np.nan
     return result
 
