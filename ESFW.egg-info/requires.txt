@@ -1,9 +1,0 @@
-anndata==0.11.1
-matplotlib==3.7.3
-multiprocess==0.70.17
-numpy
-p_tqdm==1.4.2
-pandas==2.2.3
-scikit_learn==1.5.2
-setuptools
-umap_learn==0.5.7
