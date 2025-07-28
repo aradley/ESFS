@@ -993,9 +993,16 @@ def find_max_ESSs(adata, secondary_features_label):
     combination and it's correspoinding ESS for each feature to the anndata object, using secondary_features_label as an identifier.
     """
     ###
-    print(
-        "For this function to work, you must have ran the parallel_calc_es_matrices function in a manner that attaches ESS and SG objects to your adata object that relate to your secondary_features_label label."
-    )
+    ess_label = f"{secondary_features_label}_ESSs"
+    if ess_label not in adata.varm.keys():
+        raise ValueError(
+            f"ESSs for {secondary_features_label} not found in adata.varm. Please run parallel_calc_es_matrices first."
+        )
+    sg_label = f"{secondary_features_label}_SGs"
+    if sg_label not in adata.varm.keys():
+        raise ValueError(
+            f"SGs for {secondary_features_label} not found in adata.varm. Please run parallel_calc_es_matrices first."
+        )
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
     global_scaled_matrix = adata.layers["Scaled_Counts"]
