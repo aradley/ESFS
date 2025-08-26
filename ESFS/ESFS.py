@@ -127,9 +127,7 @@ def parallel_calc_es_matrices(
     cores_avail = multiprocess.cpu_count()
     print("Cores Available: " + str(cores_avail))
     if use_cores == -1:
-        use_cores = (
-            cores_avail - 1
-        )  # -1 Is an arbitrary buffer of idle cores that I set.
+        use_cores = cores_avail - 1  # -1 Is an arbitrary buffer of idle cores that I set.
         if use_cores < 1:
             use_cores = 1
     print("Cores Used: " + str(use_cores))
@@ -1012,9 +1010,16 @@ def find_max_ESSs(adata, secondary_features_label):
     combination and it's correspoinding ESS for each feature to the anndata object, using secondary_features_label as an identifier.
     """
     ###
-    print(
-        "For this function to work, you must have ran the parallel_calc_es_matrices function in a manner that attaches ESS and SG objects to your adata object that relate to your secondary_features_label label."
-    )
+    ess_label = f"{secondary_features_label}_ESSs"
+    if ess_label not in adata.varm.keys():
+        raise ValueError(
+            f"ESSs for {secondary_features_label} not found in adata.varm. Please run parallel_calc_es_matrices first."
+        )
+    sg_label = f"{secondary_features_label}_SGs"
+    if sg_label not in adata.varm.keys():
+        raise ValueError(
+            f"SGs for {secondary_features_label} not found in adata.varm. Please run parallel_calc_es_matrices first."
+        )
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
     global_scaled_matrix = adata.layers["Scaled_Counts"]
@@ -1074,9 +1079,7 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
     cores_avail = multiprocess.cpu_count()
     print("Cores Available: " + str(cores_avail))
     if use_cores == -1:
-        use_cores = (
-            cores_avail - 1
-        )  # -1 Is an arbitrary buffer of idle cores that I set.
+        use_cores = cores_avail - 1  # -1 Is an arbitrary buffer of idle cores that I set.
         if use_cores < 1:
             use_cores = 1
     print("Cores Used: " + str(use_cores))
@@ -1376,9 +1379,7 @@ def find_minimal_combinatorial_gene_set(
     cores_avail = multiprocess.cpu_count()
     print("Cores Available: " + str(cores_avail))
     if use_cores == -1:
-        use_cores = (
-            cores_avail - 1
-        )  # -1 Is an arbitrary buffer of idle cores that I set.
+        use_cores = cores_avail - 1  # -1 Is an arbitrary buffer of idle cores that I set.
         if use_cores < 1:
             use_cores = 1
     print("Cores Used: " + str(use_cores))
@@ -1545,9 +1546,7 @@ def parallel_replace_clust(
 #### ESFS workflow plotting functions ####
 
 
-def knn_Smooth_Gene_Expression(
-    adata, use_genes, knn=30, metric="correlation", log_scale=False
-):
+def knn_Smooth_Gene_Expression(adata, use_genes, knn=30, metric="correlation", log_scale=False):
     #
     print(
         "Calculating pairwise cell-cell distance matrix. Distance metric = "
@@ -1838,7 +1837,6 @@ def plot_gene_cluster_cell_UMAPs(
     log2_gene_expression=True,
 ):
     #
-    breakpoint()
     # TODO: Refactor this to move away from strings as we have done prev with `get_gene_cluster_cell_UMAPs`
     if cell_label in adata.obs.columns:
         cell_labels = adata.obs[cell_label]
@@ -1876,7 +1874,6 @@ def plot_gene_cluster_cell_UMAPs(
                     markerscale=5,
                 )
     #
-    breakpoint()
     if xp.isin(cell_label, adata.var.index):
         #
         expression = adata[:, cell_label].X.T
@@ -1900,7 +1897,6 @@ def plot_gene_cluster_cell_UMAPs(
             cb = plt.colorbar()
             cb.set_label("$log_2$(Expression)", labelpad=-50, fontsize=10)
     #
-    breakpoint()
     if (xp.isin(cell_label, adata.obs.columns)) & (xp.isin(cell_label, adata.var.index)) == False:
         print("Cell label or gene not found in 'adata.obs.columns' or 'adata.var.index'")
 
