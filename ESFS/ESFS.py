@@ -1810,7 +1810,6 @@ def identify_max_ESSs(FF_ind, secondary_features, sorted_SGs_idxs):
         all_overlaps_options,
         all_use_cases,
         all_used_inds,
-        debug,
     )
     # EPs = xp.maximum(D_EPs,O_EPs)
     identical_features = xp.where(ESSs == 1)[0]
