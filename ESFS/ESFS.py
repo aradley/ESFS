@@ -1791,15 +1791,13 @@ def identify_max_ESSs(FF_ind, secondary_features, sorted_SGs_idxs):
     max_ent_options = xp.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
     ####
     # Caclulate the overlap between the FF states and the secondary features, using the correct ESE (1-4)
-    all_use_cases, all_overlaps_options, all_used_inds = (
-        identify_max_ESSs_get_overlap_info(
-            fixed_feature,
-            fixed_feature_cardinality,
-            sample_cardinality,
-            SF_sums,
-            FF_QF_vs_RF,
-            secondary_features,
-        )
+    all_use_cases, all_overlaps_options, all_used_inds = identify_max_ESSs_get_overlap_info(
+        fixed_feature,
+        fixed_feature_cardinality,
+        sample_cardinality,
+        SF_sums,
+        FF_QF_vs_RF,
+        secondary_features,
     )
     ## Having extracted the overlaps and their respective ESEs (1-4), calcualte the ESS and EPs
     ESSs, D_EPs, O_EPs, SWs, SGs = calc_ESSs(
