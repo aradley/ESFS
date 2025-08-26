@@ -1,30 +1,36 @@
 ###### ESFS ######
 
 ### Dependencies ###
-import numpy as np
-import pandas as pd
-import anndata as ad
-from scipy.sparse import issparse
-import umap
-from sklearn.cluster import KMeans
-from sklearn.cluster import HDBSCAN
-import matplotlib.pyplot as plt
+from functools import partial
+from types import ModuleType
+from typing import Optional
 import warnings
 
-from functools import partial
+import anndata as ad
+import matplotlib.pyplot as plt
 import multiprocess
+import numpy as np
+import pandas as pd
 from p_tqdm import p_map
-
-import matplotlib.animation as animation
-from IPython.display import Image, display
-import tempfile
-import os
-
-from scipy.sparse import csc_matrix
+import scipy.sparse as spsparse
 from scipy.spatial.distance import pdist, squareform
+from sklearn.cluster import KMeans, HDBSCAN
+from tqdm import tqdm
+import umap
 
-### Dependencies ###
+# If installed, use CuPy for GPU acceleration
+try:
+    import cupy as xp
+    import cupyx.scipy.sparse as xpsparse
 
+    USING_GPU = True
+except ImportError:
+    warnings.warn(
+        "CuPy is not installed. ESFS will run on CPU, which may be slower for large datasets."
+    )
+    xp = np
+    xpsparse = spsparse
+    USING_GPU = False
 
 ###### Entropy Sorting (ES) metric calculations ######
 
