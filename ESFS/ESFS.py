@@ -45,7 +45,8 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
     between 0 and 1.
     """
     # Filter genes with no expression
-    keep_genes = keep_genes = adata.var_names[np.where(adata.X.getnnz(axis=0) > 50)[0]]
+    # NOTE: Using numpy easier here, it isn't performance-critical code
+    keep_genes = adata.var_names[np.nonzero(adata.X.getnnz(axis=0) > 50)[0]]
     if keep_genes.shape[0] < adata.shape[1]:
         print(
             str(adata.shape[1] - keep_genes.shape[0])
@@ -54,21 +55,21 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
         adata = adata[:, keep_genes]
     # Un-sparsify the data for clipping and scaling
     scaled_expressions = adata.X.copy()
-    if issparse(scaled_expressions) == True:
-        scaled_expressions = np.asarray(scaled_expressions.todense())
+    # NOTE: Use scipy, not critical
+    if spsparse.issparse(scaled_expressions):
+        scaled_expressions = xp.asarray(scaled_expressions.todense())
     # Log scale the data if user requests.
-    if log_scale == True:
-        scaled_expressions = np.log2(scaled_expressions + 1)
+    if log_scale:
+        scaled_expressions = xp.log2(scaled_expressions + 1)
     # Clip exceptionally high gene expression for each gene. Default percentile is the 97.5th.
-    upper = np.percentile(scaled_expressions, clip_percentile, axis=0)
-    upper[np.where(upper == 0)[0]] = np.max(scaled_expressions, axis=0)[
-        np.where(upper == 0)[0]
-    ]
+    upper = xp.percentile(scaled_expressions, clip_percentile, axis=0)
+    mask = xp.nonzero(upper == 0)[0]
+    upper[mask] = xp.max(scaled_expressions, axis=0)[mask]
     scaled_expressions = scaled_expressions.clip(max=upper[None, :])
     # Normalise gene expression between 0 and 1.
     scaled_expressions = scaled_expressions / upper
     # Return data as a sparse csc_matrix
-    adata.layers["Scaled_Counts"] = csc_matrix(scaled_expressions.astype("f"))
+    adata.layers["Scaled_Counts"] = xpsparse.csc_matrix(scaled_expressions.astype("f"))
     print(
         "Scaled expression matrix has been saved to 'adata.layers['Scaled_Counts']' as a sparse csc_matrix"
     )
@@ -111,13 +112,17 @@ def parallel_calc_es_matrices(
     ## Extract sample and feature cardinality
     sample_cardinality = global_scaled_matrix.shape[0]
     ## Calculate feature sums and minority states for each adata feature
-    feature_sums = global_scaled_matrix.sum(axis=0).A[0]
+    # NOTE: .A is needed here for scipy, but incompatible with cupy.
+    if not USING_GPU:
+        feature_sums = global_scaled_matrix.sum(axis=0).A[0]
+    else:
+        feature_sums = global_scaled_matrix.sum(axis=0)[0]
     minority_states = feature_sums.copy()
-    idxs = np.where(minority_states >= (sample_cardinality / 2))[0]
+    idxs = xp.where(minority_states >= (sample_cardinality / 2))[0]
     minority_states[idxs] = sample_cardinality - minority_states[idxs]
     ####
     ## Provide indicies for parallel computing.
-    feature_inds = np.arange(secondary_features.shape[1])
+    feature_inds = xp.arange(secondary_features.shape[1])
     ## Identify number of cores to use.
     cores_avail = multiprocess.cpu_count()
     print("Cores Available: " + str(cores_avail))
@@ -242,18 +247,18 @@ def nanmaximum(arr1, arr2):
         ndarray: Element-wise maximum of arr1 and arr2, ignoring NaN values.
     """
     # Replace all inf and -inf values with -inf for both arrays
-    arr1[np.isinf(arr1)] = -np.inf
-    arr2[np.isinf(arr2)] = -np.inf
+    arr1[xp.isinf(arr1)] = -xp.inf
+    arr2[xp.isinf(arr2)] = -xp.inf
     # Replace NaN values with -infinity for comparison
-    arr1_nan = np.isnan(arr1)
-    arr2_nan = np.isnan(arr2)
-    arr1[arr1_nan] = -np.inf
-    arr2[arr2_nan] = -np.inf
+    arr1_nan = xp.isnan(arr1)
+    arr2_nan = xp.isnan(arr2)
+    arr1[arr1_nan] = -xp.inf
+    arr2[arr2_nan] = -xp.inf
     # Compute the element-wise maximum
-    result = np.maximum(arr1, arr2)
+    result = xp.maximum(arr1, arr2)
     # Where both values are NaN, the result should be NaN
     nan_mask = arr1_nan & arr2_nan
-    result[nan_mask] = np.nan
+    result[nan_mask] = xp.nan
     return result
 
 
@@ -269,22 +274,22 @@ def calc_es_metrics(feature_ind, sample_cardinality, feature_sums, minority_stat
     """
     ## Extract the Fixed Feature (FF)
     fixed_feature = secondary_features[:, feature_ind].A
-    fixed_feature_cardinality = np.sum(fixed_feature)
+    fixed_feature_cardinality = xp.sum(fixed_feature)
     fixed_feature_minority_state = fixed_feature_cardinality
     if fixed_feature_minority_state >= (sample_cardinality / 2):
         fixed_feature_minority_state = sample_cardinality - fixed_feature_minority_state
     ## Identify where FF is the QF or RF
-    FF_QF_vs_RF = np.zeros(feature_sums.shape[0])
-    FF_QF_vs_RF[np.where(fixed_feature_minority_state > minority_states)[0]] = (
+    FF_QF_vs_RF = xp.zeros(feature_sums.shape[0])
+    FF_QF_vs_RF[xp.nonzero(fixed_feature_minority_state > minority_states)[0]] = (
         1  # 1's mean FF is QF
     )
     ## Caclulate the QFms, RFms, RFMs and QFMs for each FF and secondary feature pair
     RFms = minority_states.copy()
-    idxs = np.where(FF_QF_vs_RF == 0)[0]
+    idxs = xp.where(FF_QF_vs_RF == 0)[0]
     RFms[idxs] = fixed_feature_minority_state
     RFMs = sample_cardinality - RFms
     QFms = minority_states.copy()
-    idxs = np.where(FF_QF_vs_RF == 1)[0]
+    idxs = xp.where(FF_QF_vs_RF == 1)[0]
     QFms[idxs] = fixed_feature_minority_state
     QFMs = sample_cardinality - QFms
     ## Calculate the values of (x) that correspond to the maximum for each overlap scenario (mm, Mm, mM and MM) (m = minority, M = majority)
@@ -292,7 +297,7 @@ def calc_es_metrics(feature_ind, sample_cardinality, feature_sums, minority_stat
     max_ent_x_Mm = (QFMs * RFms) / (RFms + RFMs)
     max_ent_x_mM = (RFMs * QFms) / (RFms + RFMs)
     max_ent_x_MM = (RFMs * QFMs) / (RFms + RFMs)
-    max_ent_options = np.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
+    max_ent_options = xp.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
     ######
     ## Caclulate the overlap between the FF states and the secondary features, using the correct ESE (1-4)
     all_use_cases, all_overlaps_options, all_used_inds = get_overlap_info(
@@ -497,11 +502,11 @@ def calc_ESSs(
     we may calculated the ES metrics for the FF against every other feature in adata.
     """
     ## Create variables to track caclulation outputs
-    all_ESSs = np.zeros((4, RFms.shape[0]))
-    all_D_EPs = np.zeros((4, RFms.shape[0]))
-    all_O_EPs = np.zeros((4, RFms.shape[0]))
-    all_SGs = np.zeros((4, RFms.shape[0]))
-    all_SWs = np.zeros((4, RFms.shape[0]))
+    all_ESSs = xp.zeros((4, RFms.shape[0]))
+    all_D_EPs = xp.zeros((4, RFms.shape[0]))
+    all_O_EPs = xp.zeros((4, RFms.shape[0]))
+    all_SGs = xp.zeros((4, RFms.shape[0]))
+    all_SWs = xp.zeros((4, RFms.shape[0]))
     ###################
     ##### (1)  mm #####
     use_curve = 0
@@ -509,20 +514,20 @@ def calc_ESSs(
     calc_idxs = all_used_inds[use_curve].astype("i")
     if calc_idxs.shape[0] > 0:
         # Retrieve the max_ent, Min_x, Max_X and observed overlap values
-        min_overlap = np.repeat(0, calc_idxs.shape[0])
+        min_overlap = xp.zeros_like(calc_idxs)
         max_overlap = RFms[calc_idxs]
         overlaps = all_overlaps_options[use_curve, calc_idxs]
         max_ent_x = max_ent_options[use_curve, calc_idxs]
         ind_X_1 = max_ent_x - min_overlap
         ind_X1 = max_overlap - max_ent_x
         #
-        SD_1_idxs = np.where(overlaps < max_ent_x)[0]
-        SD1_idxs = np.where(overlaps >= max_ent_x)[0]
-        SDs = np.zeros(calc_idxs.shape[0]) - 1
+        SD_1_idxs = xp.where(overlaps < max_ent_x)[0]
+        SD1_idxs = xp.where(overlaps >= max_ent_x)[0]
+        SDs = xp.zeros(calc_idxs.shape[0]) - 1
         SDs[SD1_idxs] = 1
         #
-        D = np.zeros(calc_idxs.shape[0])
-        O = np.zeros(calc_idxs.shape[0])
+        D = xp.zeros(calc_idxs.shape[0])
+        O = xp.zeros(calc_idxs.shape[0])
         D[SD_1_idxs] = overlaps[SD_1_idxs]
         O[SD_1_idxs] = (
             sample_cardinality
@@ -558,13 +563,11 @@ def calc_ESSs(
         SD_1_IndEnt = ind_E[SD_1_idxs] / ind_X_1[SD_1_idxs]
         SD1_IndEnt = ind_E[SD1_idxs] / ind_X1[SD1_idxs]
         #
-        D_EPs = np.zeros(ind_E.shape[0])
-        D_EPs[SD_1_idxs] = (
-            (CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]
-        ) - SD_1_IndEnt
+        D_EPs = xp.zeros(ind_E.shape[0])
+        D_EPs[SD_1_idxs] = ((CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]) - SD_1_IndEnt
         D_EPs[SD1_idxs] = ((CE[SD1_idxs] - min_E[SD1_idxs]) / D[SD1_idxs]) - SD1_IndEnt
         #
-        O_EPs = np.zeros(ind_E.shape[0])
+        O_EPs = xp.zeros(ind_E.shape[0])
         O_EPs[SD_1_idxs] = ((CE[SD_1_idxs]) / O[SD_1_idxs]) - SD_1_IndEnt
         O_EPs[SD1_idxs] = ((CE[SD1_idxs]) / O[SD1_idxs]) - SD1_IndEnt
         #
@@ -578,30 +581,24 @@ def calc_ESSs(
     calc_idxs = all_used_inds[use_curve].astype("i")
     if calc_idxs.shape[0] > 0:
         # Retrieve the max_ent, Min_x, Max_X and observed overlap values
-        min_overlap = np.repeat(0, calc_idxs.shape[0])
-        max_overlap = np.minimum(RFms[calc_idxs], QFMs[calc_idxs])
+        min_overlap = xp.zeros_like(calc_idxs)
+        max_overlap = xp.minimum(RFms[calc_idxs], QFMs[calc_idxs])
         overlaps = all_overlaps_options[use_curve, calc_idxs]
         max_ent_x = max_ent_options[use_curve, calc_idxs]
         ind_X_1 = max_ent_x - min_overlap
         ind_X1 = max_overlap - max_ent_x
         #
-        SD_1_idxs = np.where(overlaps < max_ent_x)[0]
-        SD1_idxs = np.where(overlaps >= max_ent_x)[0]
-        SDs = np.zeros(calc_idxs.shape[0]) - 1
+        SD_1_idxs = xp.where(overlaps < max_ent_x)[0]
+        SD1_idxs = xp.where(overlaps >= max_ent_x)[0]
+        SDs = xp.zeros(calc_idxs.shape[0]) - 1
         SDs[SD1_idxs] = 1
         #
-        D = np.zeros(calc_idxs.shape[0])
-        O = np.zeros(calc_idxs.shape[0])
+        D = xp.zeros(calc_idxs.shape[0])
+        O = xp.zeros(calc_idxs.shape[0])
         D[SD_1_idxs] = overlaps[SD_1_idxs]
-        O[SD_1_idxs] = (
-            QFms[calc_idxs][SD_1_idxs]
-            - RFms[calc_idxs][SD_1_idxs]
-            + overlaps[SD_1_idxs]
-        )
+        O[SD_1_idxs] = QFms[calc_idxs][SD_1_idxs] - RFms[calc_idxs][SD_1_idxs] + overlaps[SD_1_idxs]
         D[SD1_idxs] = RFms[calc_idxs][SD1_idxs] - overlaps[SD1_idxs]
-        O[SD1_idxs] = (
-            QFMs[calc_idxs][SD1_idxs] - RFms[calc_idxs][SD1_idxs] + D[SD1_idxs]
-        )
+        O[SD1_idxs] = QFMs[calc_idxs][SD1_idxs] - RFms[calc_idxs][SD1_idxs] + D[SD1_idxs]
         # Perform caclulations with ESE (2)
         CE, ind_E, min_E = ESE2(
             overlaps,
@@ -628,13 +625,11 @@ def calc_ESSs(
         SD_1_IndEnt = ind_E[SD_1_idxs] / ind_X_1[SD_1_idxs]
         SD1_IndEnt = ind_E[SD1_idxs] / ind_X1[SD1_idxs]
         #
-        D_EPs = np.zeros(ind_E.shape[0])
-        D_EPs[SD_1_idxs] = (
-            (CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]
-        ) - SD_1_IndEnt
+        D_EPs = xp.zeros(ind_E.shape[0])
+        D_EPs[SD_1_idxs] = ((CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]) - SD_1_IndEnt
         D_EPs[SD1_idxs] = ((CE[SD1_idxs] - min_E[SD1_idxs]) / D[SD1_idxs]) - SD1_IndEnt
         #
-        O_EPs = np.zeros(ind_E.shape[0])
+        O_EPs = xp.zeros(ind_E.shape[0])
         O_EPs[SD_1_idxs] = ((CE[SD_1_idxs]) / O[SD_1_idxs]) - SD_1_IndEnt
         O_EPs[SD1_idxs] = ((CE[SD1_idxs]) / O[SD1_idxs]) - SD1_IndEnt
         #
@@ -649,24 +644,20 @@ def calc_ESSs(
     if calc_idxs.shape[0] > 0:
         # Retrieve the max_ent, Min_x, Max_X and observed overlap values
         min_overlap = RFMs[calc_idxs] - QFMs[calc_idxs]
-        max_overlap = np.minimum(QFms[calc_idxs], RFMs[calc_idxs])
+        max_overlap = xp.minimum(QFms[calc_idxs], RFMs[calc_idxs])
         overlaps = all_overlaps_options[use_curve, calc_idxs]
         max_ent_x = max_ent_options[use_curve, calc_idxs]
         ind_X_1 = max_ent_x - min_overlap
         ind_X1 = max_overlap - max_ent_x
         #
-        SD_1_idxs = np.where(overlaps < max_ent_x)[0]
-        SD1_idxs = np.where(overlaps >= max_ent_x)[0]
-        SDs = np.zeros(calc_idxs.shape[0]) - 1
+        SD_1_idxs = xp.where(overlaps < max_ent_x)[0]
+        SD1_idxs = xp.where(overlaps >= max_ent_x)[0]
+        SDs = xp.zeros(calc_idxs.shape[0]) - 1
         SDs[SD1_idxs] = 1
         #
-        D = np.zeros(calc_idxs.shape[0])
-        O = np.zeros(calc_idxs.shape[0])
-        D[SD_1_idxs] = (
-            QFMs[calc_idxs][SD_1_idxs]
-            - RFMs[calc_idxs][SD_1_idxs]
-            + overlaps[SD_1_idxs]
-        )
+        D = xp.zeros(calc_idxs.shape[0])
+        O = xp.zeros(calc_idxs.shape[0])
+        D[SD_1_idxs] = QFMs[calc_idxs][SD_1_idxs] - RFMs[calc_idxs][SD_1_idxs] + overlaps[SD_1_idxs]
         O[SD_1_idxs] = overlaps[SD_1_idxs]
         D[SD1_idxs] = QFms[calc_idxs][SD1_idxs] - overlaps[SD1_idxs]
         O[SD1_idxs] = RFMs[calc_idxs][SD1_idxs] - overlaps[SD1_idxs]
@@ -697,13 +688,11 @@ def calc_ESSs(
         SD_1_IndEnt = ind_E[SD_1_idxs] / ind_X_1[SD_1_idxs]
         SD1_IndEnt = ind_E[SD1_idxs] / ind_X1[SD1_idxs]
         #
-        D_EPs = np.zeros(ind_E.shape[0])
-        D_EPs[SD_1_idxs] = (
-            (CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]
-        ) - SD_1_IndEnt
+        D_EPs = xp.zeros(ind_E.shape[0])
+        D_EPs[SD_1_idxs] = ((CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]) - SD_1_IndEnt
         D_EPs[SD1_idxs] = ((CE[SD1_idxs] - min_E[SD1_idxs]) / D[SD1_idxs]) - SD1_IndEnt
         #
-        O_EPs = np.zeros(ind_E.shape[0])
+        O_EPs = xp.zeros(ind_E.shape[0])
         O_EPs[SD_1_idxs] = ((CE[SD_1_idxs]) / O[SD_1_idxs]) - SD_1_IndEnt
         O_EPs[SD1_idxs] = ((CE[SD1_idxs]) / O[SD1_idxs]) - SD1_IndEnt
         #
@@ -718,28 +707,25 @@ def calc_ESSs(
     if calc_idxs.shape[0] > 0:
         # Retrieve the max_ent, Min_x, Max_X and observed overlap values
         min_overlap = QFMs[calc_idxs] - RFms[calc_idxs]
-        max_overlap = np.minimum(QFMs[calc_idxs], RFMs[calc_idxs])
+        max_overlap = xp.minimum(QFMs[calc_idxs], RFMs[calc_idxs])
         overlaps = all_overlaps_options[use_curve, calc_idxs]
         max_ent_x = max_ent_options[use_curve, calc_idxs]
         ind_X_1 = max_ent_x - min_overlap
         ind_X1 = max_overlap - max_ent_x
         #
-        SD_1_idxs = np.where(overlaps < max_ent_x)[0]
-        SD1_idxs = np.where(overlaps >= max_ent_x)[0]
-        SDs = np.zeros(calc_idxs.shape[0]) - 1
+        SD_1_idxs = xp.where(overlaps < max_ent_x)[0]
+        SD1_idxs = xp.where(overlaps >= max_ent_x)[0]
+        SDs = xp.zeros(calc_idxs.shape[0]) - 1
         SDs[SD1_idxs] = 1
         #
-        D = np.zeros(calc_idxs.shape[0])
-        O = np.zeros(calc_idxs.shape[0])
+        D = xp.zeros(calc_idxs.shape[0])
+        O = xp.zeros(calc_idxs.shape[0])
         D[SD_1_idxs] = overlaps[SD_1_idxs] - (
-            sample_cardinality
-            - (QFms[calc_idxs][SD_1_idxs] + RFms[calc_idxs][SD_1_idxs])
+            sample_cardinality - (QFms[calc_idxs][SD_1_idxs] + RFms[calc_idxs][SD_1_idxs])
         )
         O[SD_1_idxs] = overlaps[SD_1_idxs]
         D[SD1_idxs] = QFMs[calc_idxs][SD1_idxs] - overlaps[SD1_idxs]
-        O[SD1_idxs] = (
-            RFMs[calc_idxs][SD1_idxs] - QFMs[calc_idxs][SD1_idxs] + D[SD1_idxs]
-        )
+        O[SD1_idxs] = RFMs[calc_idxs][SD1_idxs] - QFMs[calc_idxs][SD1_idxs] + D[SD1_idxs]
         # Perform caclulations with ESE (4)
         CE, ind_E, min_E = ESE4(
             overlaps,
@@ -768,13 +754,11 @@ def calc_ESSs(
         SD_1_IndEnt = ind_E[SD_1_idxs] / ind_X_1[SD_1_idxs]
         SD1_IndEnt = ind_E[SD1_idxs] / ind_X1[SD1_idxs]
         #
-        D_EPs = np.zeros(ind_E.shape[0])
-        D_EPs[SD_1_idxs] = (
-            (CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]
-        ) - SD_1_IndEnt
+        D_EPs = xp.zeros(ind_E.shape[0])
+        D_EPs[SD_1_idxs] = ((CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]) - SD_1_IndEnt
         D_EPs[SD1_idxs] = ((CE[SD1_idxs] - min_E[SD1_idxs]) / D[SD1_idxs]) - SD1_IndEnt
         #
-        O_EPs = np.zeros(ind_E.shape[0])
+        O_EPs = xp.zeros(ind_E.shape[0])
         O_EPs[SD_1_idxs] = ((CE[SD_1_idxs]) / O[SD_1_idxs]) - SD_1_IndEnt
         O_EPs[SD1_idxs] = ((CE[SD1_idxs]) / O[SD1_idxs]) - SD1_IndEnt
         #
@@ -1039,31 +1023,29 @@ def find_max_ESSs(adata, secondary_features_label):
     secondary_features = adata.obsm[secondary_features_label]
     ### Extract the secondary_features ESSs from adata
     all_ESSs = adata.varm[secondary_features_label + "_ESSs"]
-    initial_max_ESSs = np.asarray(np.max(all_ESSs, axis=1))
+    initial_max_ESSs = xp.asarray(xp.max(all_ESSs, axis=1))
     max_ESSs = initial_max_ESSs.copy()
     ### Extract the secondary_features SGs from adata
-    all_SGs = np.asarray(adata.varm[secondary_features_label + "_SGs"]).copy()
+    all_SGs = xp.asarray(adata.varm[secondary_features_label + "_SGs"]).copy()
     all_SGs[all_ESSs < 0] = (
         all_SGs[all_ESSs < 0] * -1
     )  # For ordering we need to include the SG sort directions which we can extract from the ESSs
     ### For each feature in adata, sort the SGs of the secondary_features from highest to lowest. This is the main step that allows
     # use to turn the intractible combinatorial problem into a tractable linear problem.
-    sorted_SGs_idxs = np.argsort(all_SGs)[:, ::-1]
+    sorted_SGs_idxs = xp.argsort(all_SGs)[:, ::-1]
     ### Parallel warpper function
     max_ESSs, max_EPs, top_score_columns_combinations, top_score_secondary_features = (
         parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1)
     )
     ## Compile results
-    combinatorial_label_info = np.column_stack(
-        [np.array(max_ESSs), np.array(max_EPs)]
-    )  # ,np.array(top_score_columns_combinations,dtype="object")])
+    combinatorial_label_info = xp.column_stack(
+        [xp.array(max_ESSs), xp.array(max_EPs)]
+    )  # ,xp.array(top_score_columns_combinations,dtype="object")])
     combinatorial_label_info = pd.DataFrame(
         combinatorial_label_info, index=adata.var_names, columns=["Max_ESSs", "EPs"]
     )  # ,"top_score_columns_combinations"])
     ### Save Max_Combinatorial cluster information and scores
-    adata.varm[secondary_features_label + "_Max_Combinatorial_ESSs"] = (
-        combinatorial_label_info
-    )
+    adata.varm[secondary_features_label + "_Max_Combinatorial_ESSs"] = combinatorial_label_info
     print(
         "Max combinatorial ESSs for given sample labels has been saved as 'adata.varm['"
         + secondary_features_label
@@ -1071,7 +1053,7 @@ def find_max_ESSs(adata, secondary_features_label):
         + "']'"
     )
     ### Save the new features/clusters that maximise the ESS scores of each feature in adata
-    adata.obsm[secondary_features_label + "_Max_ESS_Features"] = csc_matrix(
+    adata.obsm[secondary_features_label + "_Max_ESS_Features"] = xpsparse.csc_matrix(
         top_score_secondary_features.astype("f")
     )
     print(
@@ -1088,7 +1070,7 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
     Parallelised version of identify_max_ESSs function
     """
     #
-    feature_inds = np.arange(sorted_SGs_idxs.shape[0])
+    feature_inds = xp.arange(sorted_SGs_idxs.shape[0])
     #
     cores_avail = multiprocess.cpu_count()
     print("Cores Available: " + str(cores_avail))
@@ -1116,20 +1098,18 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
             num_cpus=use_cores,
         )
     ## Extract results for each feature in adata
-    max_ESSs = np.zeros(len(results)).astype("f")
-    max_EPs = np.zeros(len(results)).astype("f")
+    max_ESSs = xp.zeros(len(results)).astype("f")
+    max_EPs = xp.zeros(len(results)).astype("f")
     top_score_columns_combinations = [[]] * len(results)
-    top_score_secondary_features = np.zeros(
-        (secondary_features.shape[0], feature_inds.shape[0])
-    )
-    for i in np.arange(len(results)):
+    top_score_secondary_features = xp.zeros((secondary_features.shape[0], feature_inds.shape[0]))
+    for i in xp.arange(len(results)):
         ESSs = results[i][0]
         EPs = results[i][1]
-        max_ESS_idx = np.argmax(ESSs)
+        max_ESS_idx = xp.argmax(ESSs)
         max_ESSs[i] = ESSs[max_ESS_idx]
         max_EPs[i] = EPs[max_ESS_idx]
         top_score_columns_combinations[i] = sorted_SGs_idxs[i, :][
-            np.arange(0, max_ESS_idx + 1)
+            xp.arange(0, max_ESS_idx + 1)
         ].tolist()
         top_score_secondary_features[:, i] = (
             secondary_features[:, top_score_columns_combinations[i]]
@@ -1155,38 +1135,37 @@ def identify_max_ESSs(FF_ind, secondary_features, sorted_SGs_idxs):
     fixed_feature = global_scaled_matrix[:, FF_ind].A
     sample_cardinality = fixed_feature.shape[0]
     ## Remove the lowest rank cluster to avoid a potential cluster size being equal to the number of samples in the data.
-    sort_order = np.delete(sorted_SGs_idxs[FF_ind, :], -1)
+    sort_order = xp.delete(sorted_SGs_idxs[FF_ind, :], -1)
     ## From the ordered one-hut clusters, take the cumulative row sums, thereby creating the set of linearly combined one-hot
     # clusters for which we will calculate the ESSs of the fixed feature against.
-    secondary_features = np.cumsum(secondary_features.A[:, sort_order], axis=1)
-    secondary_features = csc_matrix(secondary_features.astype("f"))
+    secondary_features = xp.cumsum(secondary_features.A[:, sort_order], axis=1)
+    secondary_features = xpsparse.csc_matrix(secondary_features.astype("f"))
     #### Calculate constants required for ES calculations
     SF_sums = secondary_features.A.sum(axis=0)
     SF_minority_states = SF_sums.copy()
     SF_minority_states[SF_minority_states >= (sample_cardinality / 2)] = (
-        sample_cardinality
-        - SF_minority_states[SF_minority_states >= (sample_cardinality / 2)]
+        sample_cardinality - SF_minority_states[SF_minority_states >= (sample_cardinality / 2)]
     )
     ##
     fixed_feature = fixed_feature.reshape(sample_cardinality, 1)  # Might be superfluous
     ## Calculate feature sums
-    fixed_feature_cardinality = np.sum(fixed_feature)
+    fixed_feature_cardinality = xp.sum(fixed_feature)
     fixed_feature_minority_state = fixed_feature_cardinality.copy()
     if fixed_feature_minority_state >= (sample_cardinality / 2):
         fixed_feature_minority_state = sample_cardinality - fixed_feature_minority_state
     #
     ## Identify where FF is the QF or RF
-    FF_QF_vs_RF = np.zeros(SF_minority_states.shape[0])
-    FF_QF_vs_RF[np.where(fixed_feature_minority_state > SF_minority_states)[0]] = (
+    FF_QF_vs_RF = xp.zeros(SF_minority_states.shape[0])
+    FF_QF_vs_RF[xp.where(fixed_feature_minority_state > SF_minority_states)[0]] = (
         1  # 1's mean FF is QF
     )
     ## Caclulate the QFms, RFms, RFMs and QFMs for each FF and secondary feature pair
     RFms = SF_minority_states.copy()
-    idxs = np.where(FF_QF_vs_RF == 0)[0]
+    idxs = xp.where(FF_QF_vs_RF == 0)[0]
     RFms[idxs] = fixed_feature_minority_state
     RFMs = sample_cardinality - RFms
     QFms = SF_minority_states.copy()
-    idxs = np.where(FF_QF_vs_RF == 1)[0]
+    idxs = xp.where(FF_QF_vs_RF == 1)[0]
     QFms[idxs] = fixed_feature_minority_state
     QFMs = sample_cardinality - QFms
     ## Calculate the values of (x) that correspond to the maximum for each overlap scenario (mm, Mm, mM and MM) (m = minority, M = majority)
@@ -1194,7 +1173,7 @@ def identify_max_ESSs(FF_ind, secondary_features, sorted_SGs_idxs):
     max_ent_x_Mm = (QFMs * RFms) / (RFms + RFMs)
     max_ent_x_mM = (RFMs * QFms) / (RFms + RFMs)
     max_ent_x_MM = (RFMs * QFMs) / (RFms + RFMs)
-    max_ent_options = np.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
+    max_ent_options = xp.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
     ####
     # Caclulate the overlap between the FF states and the secondary features, using the correct ESE (1-4)
     all_use_cases, all_overlaps_options, all_used_inds = (
@@ -1218,9 +1197,10 @@ def identify_max_ESSs(FF_ind, secondary_features, sorted_SGs_idxs):
         all_overlaps_options,
         all_use_cases,
         all_used_inds,
+        debug,
     )
-    # EPs = np.maximum(D_EPs,O_EPs)
-    identical_features = np.where(ESSs == 1)[0]
+    # EPs = xp.maximum(D_EPs,O_EPs)
+    identical_features = xp.where(ESSs == 1)[0]
     D_EPs[identical_features] = 0
     O_EPs[identical_features] = 0
     EPs = nanmaximum(D_EPs, O_EPs)
@@ -1247,143 +1227,133 @@ def identify_max_ESSs_get_overlap_info(
     """
     ## Set up an array to track which of ESE equations 1-4 the recorded observed overlap relates to (row), and if it is
     # native correlation (1) or flipped anti-correlation (-1). Row 1 = mm, row 2 = Mm, row 3 = mM, row 4 = MM.
-    all_use_cases = np.zeros((4, feature_sums.shape[0]))
+    all_use_cases = xp.zeros((4, feature_sums.shape[0]))
     ## Set up an array to track the observed overlaps between the FF and the secondary features.
-    all_overlaps_options = np.zeros((4, feature_sums.shape[0]))
+    all_overlaps_options = xp.zeros((4, feature_sums.shape[0]))
     ## Set up a list to track the used inds/features for each ESE
     all_used_inds = [[]] * 4
     #
-    nonzero_inds = np.where(fixed_feature != 0)[0]
+    nonzero_inds = xp.where(fixed_feature != 0)[0]
     sub_secondary_features = secondary_features[nonzero_inds, :]
-    B = csc_matrix(
+    B = xpsparse.csc_matrix(
         (
             fixed_feature[nonzero_inds].T[0][sub_secondary_features.indices],
             sub_secondary_features.indices,
             sub_secondary_features.indptr,
         )
     )
-    overlaps = sub_secondary_features.minimum(B).sum(axis=0).A[0]
+    if USING_GPU:
+        overlaps = sub_secondary_features.minimum(B.tocsr()).sum(axis=0)[0]
+    else:
+        overlaps = sub_secondary_features.minimum(B).sum(axis=0).A[0]
     #
-    inverse_fixed_feature = np.max(fixed_feature) - fixed_feature
-    nonzero_inds = np.where(inverse_fixed_feature != 0)[0]
+    inverse_fixed_feature = xp.max(fixed_feature) - fixed_feature
+    nonzero_inds = xp.where(inverse_fixed_feature != 0)[0]
     sub_secondary_features = secondary_features[nonzero_inds, :]
-    B = csc_matrix(
+    B = xpsparse.csc_matrix(
         (
             inverse_fixed_feature[nonzero_inds].T[0][sub_secondary_features.indices],
             sub_secondary_features.indices,
             sub_secondary_features.indptr,
         )
     )
-    inverse_overlaps = sub_secondary_features.minimum(B).sum(axis=0).A[0]
+    if USING_GPU:
+        inverse_overlaps = sub_secondary_features.minimum(B.tocsr()).sum(axis=0)[0]
+    else:
+        inverse_overlaps = sub_secondary_features.minimum(B).sum(axis=0).A[0]
     ## If FF is observed in it's minority state, use the following 4 steps to caclulate overlaps with every other feature
     if fixed_feature_cardinality < (sample_cardinality / 2):
         #######
         ## FF and other feature are minority states & FF is QF
-        calc_idxs = np.where(
-            (feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1)
-        )[0]
+        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
         ## Track which features are observed as mm (row 1), and which are mM when the secondary feature is flipped (row 3)
-        all_use_cases[:, calc_idxs] = np.array([1, -1, 0, 0]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([1, -1, 0, 0]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[0, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = np.append(all_used_inds[0], calc_idxs)
+        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
         all_overlaps_options[1, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = np.append(all_used_inds[1], calc_idxs)
+        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
         #######
         ## FF and other feature are minority states & FF is RF
-        calc_idxs = np.where(
-            (feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0)
-        )[0]
+        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
         ## Track which features are observed as mm (row 1), and which are Mm when the secondary feature is flipped (row 2)
-        all_use_cases[:, calc_idxs] = np.array([1, 0, -1, 0]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([1, 0, -1, 0]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[0, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = np.append(all_used_inds[0], calc_idxs)
+        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
         all_overlaps_options[2, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = np.append(all_used_inds[2], calc_idxs)
+        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
         #######
         ## FF is minority, other feature is majority & FF is QF
-        calc_idxs = np.where(
-            (feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1)
-        )[0]
+        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
         ## Track which features are observed as mM (row 4), and which are mm when the secondary feature is flipped (row 1)
-        all_use_cases[:, calc_idxs] = np.array([0, 0, 1, -1]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([0, 0, 1, -1]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[3, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = np.append(all_used_inds[3], calc_idxs)
+        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
         all_overlaps_options[2, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = np.append(all_used_inds[2], calc_idxs)
+        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
         #######
         ## FF is minority, other feature is majority & FF is RF
-        calc_idxs = np.where(
-            (feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0)
-        )[0]
+        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
         ## Track which features are observed as Mm (row 2), and which are mm when the secondary feature is flipped (row 1)
-        all_use_cases[:, calc_idxs] = np.array([0, 1, 0, -1]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([0, 1, 0, -1]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[3, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = np.append(all_used_inds[3], calc_idxs)
+        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
         all_overlaps_options[1, calc_idxs] = overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = np.append(all_used_inds[1], calc_idxs)
+        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
         #
     ## If FF is observed in it's majority state, use the following 4 steps to caclulate overlaps with every other feature
     if fixed_feature_cardinality >= (sample_cardinality / 2):
         #######
         ## FF is majority, other feature is minority & FF is QF
-        calc_idxs = np.where(
-            (feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1)
-        )[0]
+        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
         ## Track which features are observed as Mm (row 2), and which are MM when the secondary feature is flipped (row 4)
-        all_use_cases[:, calc_idxs] = np.array([-1, 1, 0, 0]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([-1, 1, 0, 0]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[1, calc_idxs] = overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = np.append(all_used_inds[1], calc_idxs)
+        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
         all_overlaps_options[0, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = np.append(all_used_inds[0], calc_idxs)
+        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
         #######
         ## FF is majority, other feature is minority & FF is RF
-        calc_idxs = np.where(
-            (feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0)
-        )[0]
+        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
         ## Track which features are observed as mM (row 3), and which are MM when the secondary feature is flipped (row 4)
-        all_use_cases[:, calc_idxs] = np.array([-1, 0, 1, 0]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([-1, 0, 1, 0]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[2, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = np.append(all_used_inds[2], calc_idxs)
+        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
         all_overlaps_options[0, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = np.append(all_used_inds[0], calc_idxs)
+        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
         #######
         ## FF is majority, other feature is majority & FF is QF
-        calc_idxs = np.where(
-            (feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1)
-        )[0]
+        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
         ## Track which features are observed as MM (row 4), and which are Mm when the secondary feature is flipped (row 2)
-        all_use_cases[:, calc_idxs] = np.array([0, 0, -1, 1]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([0, 0, -1, 1]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[2, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = np.append(all_used_inds[2], calc_idxs)
+        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
         all_overlaps_options[3, calc_idxs] = overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = np.append(all_used_inds[3], calc_idxs)
+        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
         #######
         ## FF is majority, other feature is majority & FF is RF
-        calc_idxs = np.where(
-            (feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0)
-        )[0]
+        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
         ## Track which features are observed as MM (row 4), and which are mM when the secondary feature is flipped (row 3)
-        all_use_cases[:, calc_idxs] = np.array([0, -1, 0, 1]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([0, -1, 0, 1]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[1, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = np.append(all_used_inds[1], calc_idxs)
+        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
         all_overlaps_options[3, calc_idxs] = overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = np.append(all_used_inds[3], calc_idxs)
+        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
         #
     return all_use_cases, all_overlaps_options, all_used_inds
 
@@ -1422,24 +1392,24 @@ def find_minimal_combinatorial_gene_set(
     input_gene_idxs = np.where(np.isin(adata.var_names, input_genes))[0]
     ###
     global clust_ESSs
-    clust_ESSs = np.asarray(adata.varm[secondary_features_label + "_ESSs"])[
-        np.ix_(input_gene_idxs, input_gene_idxs)
+    clust_ESSs = xp.asarray(adata.varm[secondary_features_label + "_ESSs"])[
+        xp.ix_(input_gene_idxs, input_gene_idxs)
     ]
     clust_ESSs[clust_ESSs < 0] = 0
     ###
-    max_ESSs = np.max(clust_ESSs, axis=1)
+    max_ESSs = xp.max(clust_ESSs, axis=1)
     ###
-    chosen_clusts = np.random.choice(clust_ESSs.shape[0], N, replace=False)
+    # TODO: Control seed for reproducibility
+    chosen_clusts = xp.random.choice(clust_ESSs.shape[0], N, replace=False)
     ###
-    best_score = -np.inf
+    best_score = -xp.inf
     reheat = 0
     while reheat <= num_reheats:
         ###
-        chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
-        np.fill_diagonal(chosen_pairwise_ESSs, 0)
-        current_score = np.sum(
-            max_ESSs[chosen_clusts]
-            - (np.max(chosen_pairwise_ESSs, axis=1) * resolution)
+        chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
+        xp.fill_diagonal(chosen_pairwise_ESSs, 0)
+        current_score = xp.sum(
+            max_ESSs[chosen_clusts] - (xp.max(chosen_pairwise_ESSs, axis=1) * resolution)
         )
         ###
         end = 0
@@ -1460,7 +1430,7 @@ def find_minimal_combinatorial_gene_set(
                 use_cores=use_cores,
             )
             ###
-            replace_clust_idx = np.argmax(all_max_changes)
+            replace_clust_idx = xp.argmax(all_max_changes)
             if all_max_changes[replace_clust_idx] > 0:
                 # print(all_max_replacement_scores[replace_clust_idx])
                 replacement_clust_idx = all_max_change_idxs[replace_clust_idx]
@@ -1468,11 +1438,10 @@ def find_minimal_combinatorial_gene_set(
                 # print(Replacement_Gene_Ind)
                 chosen_clusts[replace_clust_idx] = replacement_clust_idx
                 #
-                chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
-                np.fill_diagonal(chosen_pairwise_ESSs, 0)
-                current_score = np.sum(
-                    max_ESSs[chosen_clusts]
-                    - (np.max(chosen_pairwise_ESSs, axis=1) * resolution)
+                chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
+                xp.fill_diagonal(chosen_pairwise_ESSs, 0)
+                current_score = xp.sum(
+                    max_ESSs[chosen_clusts] - (xp.max(chosen_pairwise_ESSs, axis=1) * resolution)
                 )
                 #
                 # print(current_score)
@@ -1483,14 +1452,13 @@ def find_minimal_combinatorial_gene_set(
             else:
                 end = 1
         #
-        reheat_num = int(np.ceil(N * 0.25))
-        random_reheat_1 = np.random.choice(
-            input_genes.shape[0], reheat_num, replace=False
-        )
-        random_reheat_2 = np.random.randint(chosen_clusts.shape[0], size=reheat_num)
+        reheat_num = int(xp.ceil(N * 0.25))
+        # TODO: Control seed for reproducibility
+        random_reheat_1 = xp.random.choice(len(input_genes), reheat_num, replace=False)
+        random_reheat_2 = xp.random.randint(chosen_clusts.shape[0], size=reheat_num)
         chosen_clusts[random_reheat_2] = random_reheat_1
         reheat = reheat + 1
-        print("reheat number: " + str(reheat))
+        print(f"Reheat number: {reheat}")
     #
     chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
     return best_chosen_clusters, input_genes[best_chosen_clusters], chosen_pairwise_ESSs
@@ -1504,31 +1472,31 @@ def replace_clust(
     max_ESSs,
     resolution,
 ):
-    sub_chosen_clusts = np.delete(chosen_clusts, replace_idx)
+    sub_chosen_clusts = xp.delete(chosen_clusts, replace_idx)
     #
-    sub_chosen_pairwise_ESSs = np.delete(
+    sub_chosen_pairwise_ESSs = xp.delete(
         chosen_pairwise_ESSs, replace_idx, axis=0
     )  # Delete a row, which should be the cluster
-    sub_chosen_pairwise_ESSs = np.delete(sub_chosen_pairwise_ESSs, replace_idx, axis=1)
-    sub_2nd_maxs = np.max(sub_chosen_pairwise_ESSs, axis=1)
+    sub_chosen_pairwise_ESSs = xp.delete(sub_chosen_pairwise_ESSs, replace_idx, axis=1)
+    sub_2nd_maxs = xp.max(sub_chosen_pairwise_ESSs, axis=1)
     replacement_columns = clust_ESSs[sub_chosen_clusts, :]
-    replacement_columns[(np.arange(sub_chosen_clusts.shape[0]), sub_chosen_clusts)] = 0
-    sub_2nd_maxs = np.maximum(sub_2nd_maxs[:, np.newaxis], replacement_columns)
+    replacement_columns[(xp.arange(sub_chosen_clusts.shape[0]), sub_chosen_clusts)] = 0
+    sub_2nd_maxs = xp.maximum(sub_2nd_maxs[:, xp.newaxis], replacement_columns)
     #
-    replacement_scores_1 = np.sum(
-        (max_ESSs[sub_chosen_clusts, np.newaxis] - (sub_2nd_maxs * resolution)), axis=0
+    replacement_scores_1 = xp.sum(
+        (max_ESSs[sub_chosen_clusts, xp.newaxis] - (sub_2nd_maxs * resolution)), axis=0
     )
     #
     replacement_rows = clust_ESSs[:, sub_chosen_clusts]
-    replacement_rows[(sub_chosen_clusts, np.arange(sub_chosen_clusts.shape[0]))] = 0
+    replacement_rows[(sub_chosen_clusts, xp.arange(sub_chosen_clusts.shape[0]))] = 0
     #
-    replacement_scores_2 = max_ESSs - (np.max(replacement_rows, axis=1) * resolution)
+    replacement_scores_2 = max_ESSs - (xp.max(replacement_rows, axis=1) * resolution)
     #
     replacement_scores = replacement_scores_1 + replacement_scores_2
     ###
     changes = replacement_scores - current_score
-    changes[chosen_clusts] = -np.inf
-    max_idx = np.argmax(changes)
+    changes[chosen_clusts] = -xp.inf
+    max_idx = xp.argmax(changes)
     max_change = changes[max_idx]
     # all_max_changes[i] = max_change
     # all_max_change_idxs[i] = max_idx
@@ -1546,7 +1514,7 @@ def parallel_replace_clust(
     resolution,
     use_cores,
 ):
-    replace_idxs = np.arange(N)
+    replace_idxs = xp.arange(N)
     #
     pool = multiprocess.Pool(processes=use_cores)
     results = pool.map(
@@ -1562,7 +1530,7 @@ def parallel_replace_clust(
     )
     pool.close()
     pool.join()
-    results = np.asarray(results)
+    results = xp.asarray(results)
     all_max_changes = results[:, 0]
     all_max_change_idxs = results[:, 1]
     all_max_replacement_scores = results[:, 2]
@@ -1582,26 +1550,26 @@ def knn_Smooth_Gene_Expression(
         + ", knn = "
         + str(knn)
     )
-    if issparse(adata.X) == True:
+    if xpsparse.issparse(adata.X) == True:
         distmat = squareform(pdist(adata[:, use_genes].X.A, metric))
         smoothed_expression = adata.X.A.copy()
     else:
         distmat = squareform(pdist(adata[:, use_genes].X, metric))
         smoothed_expression = adata.X.copy()
-    neighbors = np.sort(np.argsort(distmat, axis=1)[:, 0:knn])
+    neighbors = xp.sort(xp.argsort(distmat, axis=1)[:, 0:knn])
     #
     if log_scale == True:
-        smoothed_expression = np.log2(smoothed_expression + 1)
+        smoothed_expression = xp.log2(smoothed_expression + 1)
     #
     neighbour_expression = smoothed_expression[neighbors]
-    smoothed_expression = np.mean(neighbour_expression, axis=1)
+    smoothed_expression = xp.mean(neighbour_expression, axis=1)
 
     print(
         "A Smoothed_Expression sparse csc_matrix matrix with knn = "
         + str(knn)
         + " has been saved to 'adata.layers['Smoothed_Expression']'"
     )
-    adata.layers["Smoothed_Expression"] = csc_matrix(smoothed_expression.astype("f"))
+    adata.layers["Smoothed_Expression"] = xpsparse.csc_matrix(smoothed_expression.astype("f"))
     return adata
 
 
@@ -1618,7 +1586,7 @@ def ES_Rank_Genes(
     # ESSs = adata.varp['ESSs']
     masked_ESSs = adata.varm[secondary_features_label + "_ESSs"].copy()
     masked_EPs = adata.varm[secondary_features_label + "_EPs"].copy()
-    mask = np.where((masked_EPs < EP_threshold) | (masked_ESSs < ESS_threshold))
+    mask = (masked_EPs < EP_threshold) | (masked_ESSs < ESS_threshold)
     masked_ESSs[mask] = 0
     masked_EPs[mask] = 0
     used_features = np.asarray(adata.var.index)
@@ -1652,13 +1620,14 @@ def ES_Rank_Genes(
         ]
     ##
     # masked_ESSs = absolute_ESSs.copy()
-    # masked_ESSs[np.where((masked_EPs < EP_threshold) | (absolute_ESSs < ESS_threshold))] = 0
+    # masked_ESSs[xp.where((masked_EPs < EP_threshold) | (absolute_ESSs < ESS_threshold))] = 0
     ##
-    print("Caclulating feature weights")
-    feature_weights = np.average(masked_ESSs, weights=masked_EPs, axis=0)
+    print("Calculating feature weights")
+    feature_weights = xp.average(masked_ESSs, weights=masked_EPs, axis=0)
     sig_genes_per_gene = (masked_EPs > EP_threshold).sum(1)
     norm_network_feature_weights = feature_weights / sig_genes_per_gene
     ##
+    sorted_indices = xp.argsort(-norm_network_feature_weights)
     if known_important_genes.shape[0] > 0:
         ranks = pd.DataFrame(
             np.zeros((1, known_important_genes.shape[0])),
@@ -1707,13 +1676,13 @@ def plot_top_ranked_genes_UMAP(
         + str(top_ranked_genes)
         + " ranked genes in a UMAP."
     )
-    top_ESS_gene_idxs = np.where(adata.var["ES_Rank"] < top_ranked_genes)[0]
+    top_ESS_gene_idxs = xp.where(adata.var["ES_Rank"] < top_ranked_genes)[0]
     top_ESS_genes = adata.var["ES_Rank"].index[top_ESS_gene_idxs]
     ##
     masked_ESSs = adata.varm[secondary_features_label + "_ESSs"].copy()[
-        np.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
+        xp.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
     ]
-    # masked_ESSs[adata.varp["EPs"][np.ix_(Top_ESS_Gene_idxs,Top_ESS_Gene_idxs)] < 0] = 0
+    # masked_ESSs[adata.varp["EPs"][xp.ix_(Top_ESS_Gene_idxs,Top_ESS_Gene_idxs)] < 0] = 0
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         gene_embedding = umap.UMAP(
@@ -1734,7 +1703,7 @@ def plot_top_ranked_genes_UMAP(
         plt.scatter(gene_embedding[:, 0], gene_embedding[:, 1], s=7)
         plt.xlabel("UMAP 1", fontsize=16)
         plt.ylabel("UMAP 2", fontsize=16)
-        labels = np.zeros(top_ranked_genes)
+        labels = xp.zeros(top_ranked_genes)
     # Kmeans clustering
     if isinstance(clustering, int):
         print(
@@ -1744,15 +1713,15 @@ def plot_top_ranked_genes_UMAP(
             gene_embedding
         )
         labels = kmeans.labels_
-        unique_labels = np.unique(labels)
+        unique_labels = xp.unique(labels)
         #
         plt.figure(figsize=(5, 5))
         plt.title(
             "Top " + str(top_ranked_genes) + " genes UMAP\nClustering = Kmeans",
             fontsize=20,
         )
-        for i in np.arange(unique_labels.shape[0]):
-            idxs = np.where(labels == unique_labels[i])[0]
+        for i in xp.arange(unique_labels.shape[0]):
+            idxs = xp.where(labels == unique_labels[i])[0]
             plt.scatter(
                 gene_embedding[idxs, 0],
                 gene_embedding[idxs, 1],
@@ -1768,18 +1737,18 @@ def plot_top_ranked_genes_UMAP(
             "Clustering == 'hdbscan', set Clustering to an integer value for automated Kmeans clustering."
         )
         hdb = HDBSCAN(min_cluster_size=hdbscan_min_cluster_size)
-        np.random.seed(42)
+        xp.random.seed(42)
         hdb.fit(gene_embedding)
         labels = hdb.labels_
-        unique_labels = np.unique(labels)
+        unique_labels = xp.unique(labels)
         #
         plt.figure(figsize=(5, 5))
         plt.title(
             "Top " + str(top_ranked_genes) + " genes UMAP\nClustering = hdbscan",
             fontsize=20,
         )
-        for i in np.arange(unique_labels.shape[0]):
-            idxs = np.where(labels == unique_labels[i])[0]
+        for i in xp.arange(unique_labels.shape[0]):
+            idxs = xp.where(labels == unique_labels[i])[0]
             plt.scatter(
                 gene_embedding[idxs, 0],
                 gene_embedding[idxs, 1],
@@ -1791,7 +1760,8 @@ def plot_top_ranked_genes_UMAP(
         plt.ylabel("UMAP 2", fontsize=16)
     #
     if known_important_genes.shape[0] > 0:
-        important_gene_idxs = np.where(np.isin(top_ESS_genes, known_important_genes))[0]
+        important_gene_idxs = top_ESS_genes.get_indexer(known_important_genes)
+        # NOTE: If known_important_genes are not in top_ESS_genes, important_gene_idxs will be -1
         plt.scatter(
             gene_embedding[important_gene_idxs, 0],
             gene_embedding[important_gene_idxs, 1],
@@ -1840,8 +1810,8 @@ def get_gene_cluster_cell_UMAPs(
         gene_cluster_selected_genes[i] = selected_genes
         # np.save(path + "Saved_ESFS_Genes.npy",np.asarray(selected_genes))
         reduced_input_data = adata[:, selected_genes].X.A
-        if log_transformed == True:
-            reduced_input_data = np.log2(reduced_input_data + 1)
+        if log_transformed:
+            reduced_input_data = xp.log2(reduced_input_data + 1)
         #
         # embedding_model = umap.UMAP(n_neighbors=n_neighbors, metric="correlation",min_dist=min_dist,n_components=2,random_state=42).fit(reduced_input_data)
         embedding_model = umap.UMAP(
@@ -1866,7 +1836,7 @@ def plot_gene_cluster_cell_UMAPs(
     #
     if np.isin(cell_label, adata.obs.columns):
         cell_labels = adata.obs[cell_label]
-        unique_cell_labels = np.unique(cell_labels)
+        unique_cell_labels = xp.unique(cell_labels)
         #
         for i in np.arange(len(gene_cluster_embeddings)):
             embedding = gene_cluster_embeddings[i]
@@ -1878,8 +1848,8 @@ def plot_gene_cluster_cell_UMAPs(
                 + " genes",
                 fontsize=20,
             )
-            for j in np.arange(unique_cell_labels.shape[0]):
-                IDs = np.where(cell_labels == unique_cell_labels[j])
+            for j in xp.arange(unique_cell_labels.shape[0]):
+                IDs = xp.where(cell_labels == unique_cell_labels[j])
                 plt.scatter(
                     embedding[IDs, 0],
                     embedding[IDs, 1],
@@ -1907,15 +1877,15 @@ def plot_gene_cluster_cell_UMAPs(
     if np.isin(cell_label, adata.var.index):
         #
         expression = adata[:, cell_label].X.T
-        if issparse(expression):
+        if xpsparse.issparse(expression):
             expression = expression.todense()
         #
-        expression = np.asarray(expression)[0]
+        expression = xp.asarray(expression)[0]
         #
         if log2_gene_expression == True:
-            expression = np.log2(expression + 1)
+            expression = xp.log2(expression + 1)
         #
-        for i in np.arange(len(gene_cluster_embeddings)):
+        for i in xp.arange(len(gene_cluster_embeddings)):
             embedding = gene_cluster_embeddings[i]
             plt.figure(figsize=(7, 5))
             plt.title("Cell UMAP" + "\n" + cell_label, fontsize=20)
@@ -1929,20 +1899,17 @@ def plot_gene_cluster_cell_UMAPs(
             cb = plt.colorbar()
             cb.set_label("$log_2$(Expression)", labelpad=-50, fontsize=10)
     #
-    if (np.isin(cell_label, adata.obs.columns)) & (
-        np.isin(cell_label, adata.var.index)
-    ) == False:
-        print(
-            "Cell label or gene not found in 'adata.obs.columns' or 'adata.var.index'"
-        )
+    breakpoint()
+    if (xp.isin(cell_label, adata.obs.columns)) & (xp.isin(cell_label, adata.var.index)) == False:
+        print("Cell label or gene not found in 'adata.obs.columns' or 'adata.var.index'")
 
 
 # def Convert_To_Ranked_Gene_List(adata,sample_labels):
 #     ESSs = adata.varm[sample_labels+'_ESSs']
-#     Columns = np.asarray(ESSs.columns)
-#     Ranked_Gene_List = pd.DataFrame(np.zeros(ESSs.shape),columns=Columns)
-#     for i in np.arange(Columns.shape[0]):
-#         Ranked_Gene_List[Columns[i]] = ESSs.index[np.argsort(-ESSs[Columns[i]])]
+#     Columns = xp.asarray(ESSs.columns)
+#     Ranked_Gene_List = pd.DataFrame(xp.zeros(ESSs.shape),columns=Columns)
+#     for i in xp.arange(Columns.shape[0]):
+#         Ranked_Gene_List[Columns[i]] = ESSs.index[xp.argsort(-ESSs[Columns[i]])]
 #     #
 #     return Ranked_Gene_List
 
@@ -1955,12 +1922,12 @@ def plot_gene_cluster_cell_UMAPs(
 #         ax.clear()  # Clear previous frame
 #         Gene = Chosen_Genes[i]
 #         Exp = adata[:,Gene].layers["Smoothed_Expression"].A.ravel()
-#         Order = np.argsort(Exp)
+#         Order = xp.argsort(Exp)
 #         #
 #         ax.set_title(Gene, fontsize=22)
-#         Vmax = np.percentile(Exp, 99)
+#         Vmax = xp.percentile(Exp, 99)
 #         if Vmax == 0:
-#             Vmax = np.max(Exp)
+#             Vmax = xp.max(Exp)
 #         scatter = ax.scatter(embedding[Order, 0], embedding[Order, 1], c=Exp[Order], s=2, vmax=Vmax, cmap="seismic")
 #         #
 #         ax.set_xticks([])
