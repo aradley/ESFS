@@ -79,7 +79,7 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
 def parallel_calc_es_matrices(
     adata,
     secondary_features_label="Self",
-    save_matrices=np.array(["ESSs", "EPs"]),
+    save_matrices: tuple = ("ESSs", "EPs"),
     use_cores=-1,
 ):
     """
@@ -166,8 +166,8 @@ def parallel_calc_es_matrices(
     ## Unpack results
     Results = np.asarray(Results)
     ## Save outputs requested by the save_matrices paramater
-    if np.isin("ESSs", save_matrices):
-        ESSs = Results[:, 0, :]
+    if "ESSs" in save_matrices:
+        ESSs = results[:, 0, :]
         if (
             secondary_features_label == "Self"
         ):  ## The vast majority of outputs are symmetric, but float errors appear to make some non-symmetric. If we can fix this that could be cool.
@@ -184,8 +184,8 @@ def parallel_calc_es_matrices(
             + "_ESSs']'"
         )
         #
-    if np.isin("EPs", save_matrices):
-        EPs = Results[:, 1, :]
+    if "EPs" in save_matrices:
+        EPs = results[:, 1, :]
         if secondary_features_label == "Self":
             EPs = nanmaximum(EPs, EPs.T)
         #
@@ -200,8 +200,8 @@ def parallel_calc_es_matrices(
             + "_EPs']'"
         )
         #
-    if np.isin("SWs", save_matrices):
-        SWs = Results[:, 2, :]
+    if "SWs" in save_matrices:
+        SWs = results[:, 2, :]
         if secondary_features_label == "Self":
             SWs = nanmaximum(SWs, SWs.T)
         #
@@ -216,8 +216,8 @@ def parallel_calc_es_matrices(
             + "_SWs']'"
         )
         #
-    if np.isin("SGs", save_matrices):
-        SGs = Results[:, 3, :]
+    if "SGs" in save_matrices:
+        SGs = results[:, 3, :]
         if secondary_features_label == "Self":
             SGs = nanmaximum(SGs, SGs.T)
         #
@@ -231,7 +231,6 @@ def parallel_calc_es_matrices(
             + secondary_features_label
             + "_SGs']'"
         )
-        #
     return adata
 
 
@@ -1112,9 +1111,7 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
             xp.arange(0, max_ESS_idx + 1)
         ].tolist()
         top_score_secondary_features[:, i] = (
-            secondary_features[:, top_score_columns_combinations[i]]
-            .sum(axis=1)
-            .A.reshape(-1)
+            secondary_features[:, top_score_columns_combinations[i]].sum(axis=1).A.reshape(-1)
         )
     ## Return results
     return (
@@ -1365,7 +1362,7 @@ def find_minimal_combinatorial_gene_set(
     adata,
     N,
     secondary_features_label,
-    input_genes=np.array([]),
+    input_genes: Optional[tuple[str]] = None,
     num_reheats=5,
     resolution=1,
     use_cores=-1,
@@ -1386,10 +1383,14 @@ def find_minimal_combinatorial_gene_set(
             use_cores = 1
     print("Cores Used: " + str(use_cores))
     # Gene set optimisation
-    if input_genes.shape[0] == 0:
-        input_genes = np.array(adata.var_names.tolist())
+    if input_genes is None:
+        # input_genes = xp.array(adata.var_names.tolist())
+        input_genes = adata.var_names.tolist()
+        # No need to calc, since the input genes are from our adata
+        input_gene_idxs = range(len(input_genes))
+    else:
+        input_gene_idxs = adata.var_names.get_indexer(input_genes)
     #
-    input_gene_idxs = np.where(np.isin(adata.var_names, input_genes))[0]
     ###
     global clust_ESSs
     clust_ESSs = xp.asarray(adata.varm[secondary_features_label + "_ESSs"])[
@@ -1460,8 +1461,12 @@ def find_minimal_combinatorial_gene_set(
         reheat = reheat + 1
         print(f"Reheat number: {reheat}")
     #
-    chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
-    return best_chosen_clusters, input_genes[best_chosen_clusters], chosen_pairwise_ESSs
+    chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
+    return (
+        best_chosen_clusters,
+        [input_genes[i] for i in best_chosen_clusters],
+        chosen_pairwise_ESSs,
+    )
 
 
 def replace_clust(
@@ -1577,8 +1582,8 @@ def ES_Rank_Genes(
     adata,
     ESS_threshold,
     EP_threshold=0,
-    exclude_genes=np.array([]),
-    known_important_genes=np.array([]),
+    exclude_genes: Optional[tuple] = None,
+    known_important_genes: Optional[tuple] = None,
     secondary_features_label="Self",
     min_edges=5,
 ):
@@ -1589,35 +1594,41 @@ def ES_Rank_Genes(
     mask = (masked_EPs < EP_threshold) | (masked_ESSs < ESS_threshold)
     masked_ESSs[mask] = 0
     masked_EPs[mask] = 0
-    used_features = np.asarray(adata.var.index)
-    used_features_idxs = np.arange(used_features.shape[0])
+    # used_features = xp.asarray(adata.var.index)
+    # used_features_idxs = xp.arange(used_features.shape[0])
+    used_features_d_idxs = {i: j for i, j in enumerate(adata.var.index)}
+    used_features_d_names = {v: k for k, v in used_features_d_idxs.items()}
     ##
-    low_connectivity = used_features[
-        np.where(np.sum((masked_EPs > 0), axis=0) < min_edges)[0]
-    ]
-    remove_genes = np.unique(np.append(exclude_genes, low_connectivity))
+    low_conn_idxs = xp.nonzero(xp.sum((masked_EPs > 0), axis=0) < min_edges)[0]
+    low_connectivity = [used_features_d_idxs[i] for i in low_conn_idxs]
+    if exclude_genes is not None:
+        remove_genes = list(set(exclude_genes) | set(low_connectivity))
+    else:
+        remove_genes = low_connectivity
     ##
     print(
         "Pruning ESS graph by removing genes with with low numbers of edges (min_edges = "
         + str(min_edges)
         + ")"
     )
-    print("Starting genes = " + str(used_features_idxs.shape[0]))
-    while remove_genes.shape[0] > 0:
-        excude_genes_idxs = np.where(np.isin(used_features, remove_genes))[0]
-        #
-        used_features_idxs = np.delete(used_features_idxs, excude_genes_idxs)
-        used_features = np.delete(used_features, excude_genes_idxs)
-        # absolute_ESSs = absolute_ESSs[np.ix_(used_features_idxs,used_features_idxs)]
-        # ESSs = ESSs[np.ix_(used_features_idxs,used_features_idxs)]
-        masked_EPs = masked_EPs[np.ix_(used_features_idxs, used_features_idxs)]
-        masked_ESSs = masked_ESSs[np.ix_(used_features_idxs, used_features_idxs)]
-        #
-        used_features_idxs = np.arange(used_features.shape[0])
-        print("Remaining genes = " + str(used_features_idxs.shape[0]))
-        remove_genes = used_features[
-            np.where(np.sum((masked_EPs > 0), axis=0) < min_edges)[0]
+    print(f"Starting genes = {len(used_features_d_idxs)}")
+    while len(remove_genes) > 0:
+        for name in remove_genes:
+            i = used_features_d_names.pop(name)
+            used_features_d_idxs.pop(i, None)
+        # absolute_ESSs = absolute_ESSs[xp.ix_(used_features_idxs,used_features_idxs)]
+        # ESSs = ESSs[xp.ix_(used_features_idxs,used_features_idxs)]
+        masked_EPs = masked_EPs[
+            xp.ix_(list(used_features_d_idxs.keys()), list(used_features_d_idxs.keys()))
         ]
+        masked_ESSs = masked_ESSs[
+            xp.ix_(list(used_features_d_idxs.keys()), list(used_features_d_idxs.keys()))
+        ]
+        used_features_d_idxs = {i: j for i, j in enumerate(used_features_d_names.keys())}
+        used_features_d_names = {v: k for k, v in used_features_d_idxs.items()}
+        print(f"Remaining genes = {len(used_features_d_idxs)}")
+        remove_idxs = xp.nonzero(xp.sum((masked_EPs > 0), axis=0) < min_edges)[0]
+        remove_genes = [used_features_d_idxs[i] for i in remove_idxs]
     ##
     # masked_ESSs = absolute_ESSs.copy()
     # masked_ESSs[xp.where((masked_EPs < EP_threshold) | (absolute_ESSs < ESS_threshold))] = 0
@@ -1629,29 +1640,24 @@ def ES_Rank_Genes(
     ##
     sorted_indices = xp.argsort(-norm_network_feature_weights)
     if known_important_genes.shape[0] > 0:
-        ranks = pd.DataFrame(
-            np.zeros((1, known_important_genes.shape[0])),
-            index=["Rank"],
-            columns=known_important_genes,
-        )
-        rank_sorted = used_features[np.argsort(-norm_network_feature_weights)]
-        for i in np.arange(known_important_genes.shape[0]):
-            rank = np.where(rank_sorted == known_important_genes[i])[0]
-            if rank.shape[0] > 0:
-                ranks[known_important_genes[i]] = rank
-            else:
-                ranks[known_important_genes[i]] = np.nan
+        # print(used_features == list(used_features_d_names.keys()))
+        # Get sorted indices by descending norm_network_feature_weights
+        # Map sorted indices to gene names using used_features_idxs
+        rank_sorted_names = [used_features_d_idxs[i] for i in sorted_indices]
+        gene_rank_dict = {gene: rank for rank, gene in enumerate(rank_sorted_names)}
+        # Build dictionary of known important gene ranks
+        df_ranks = {}
+        for gene in known_important_genes:
+            df_ranks[gene] = gene_rank_dict.get(gene, xp.nan)
+        df_ranks = pd.DataFrame(df_ranks, index=["Rank"])
         ##
         print("Known inportant gene ranks:")
-        print(ranks)
+        print(df_ranks)
     ##
-    idxs = np.argsort(-norm_network_feature_weights)
     norm_weights = pd.DataFrame(
-        norm_network_feature_weights[idxs], index=used_features[idxs]
+        norm_network_feature_weights[sorted_indices], index=rank_sorted_names
     )
-    ranked_genes = pd.DataFrame(
-        np.arange(idxs.shape[0]).astype("i"), index=used_features[idxs]
-    )
+    ranked_genes = pd.DataFrame(range(sorted_indices.shape[0]), index=rank_sorted_names)
     ##
     adata.var["ESFS_Gene_Weights"] = norm_weights
     print("ESFS gene weights have been saved to 'adata.var['ESFS_Gene_Weights']'")
@@ -1665,16 +1671,14 @@ def plot_top_ranked_genes_UMAP(
     adata,
     top_ranked_genes,
     clustering="None",
-    known_important_genes=np.array([]),
+    known_important_genes=xp.array([]),
     UMAP_min_dist=0.1,
     UMAP_neighbours=20,
     hdbscan_min_cluster_size=50,
     secondary_features_label="Self",
 ):
     print(
-        "Visualising the ESS graph of the top "
-        + str(top_ranked_genes)
-        + " ranked genes in a UMAP."
+        "Visualising the ESS graph of the top " + str(top_ranked_genes) + " ranked genes in a UMAP."
     )
     top_ESS_gene_idxs = xp.where(adata.var["ES_Rank"] < top_ranked_genes)[0]
     top_ESS_genes = adata.var["ES_Rank"].index[top_ESS_gene_idxs]
@@ -1709,9 +1713,7 @@ def plot_top_ranked_genes_UMAP(
         print(
             "Clustering == an integer value leading to Kmeans clustering, set Clustering to 'hdbscan' for automated density clustering."
         )
-        kmeans = KMeans(n_clusters=clustering, random_state=42, n_init="auto").fit(
-            gene_embedding
-        )
+        kmeans = KMeans(n_clusters=clustering, random_state=42, n_init="auto").fit(gene_embedding)
         labels = kmeans.labels_
         unique_labels = xp.unique(labels)
         #
@@ -1782,33 +1784,34 @@ def get_gene_cluster_cell_UMAPs(
     adata,
     gene_clust_labels,
     top_ESS_genes,
-    n_neighbors,
-    min_dist,
-    log_transformed,
-    specific_cluster=None,
+    n_neighbors: int,
+    min_dist: float,
+    log_transformed: bool,
+    specific_cluster: Optional[int] = None,
+    **kwargs,
 ):
     print(
         "Generating the cell UMAP embeddings for each cluster of genes from the previous function."
     )
-    if specific_cluster == None:
-        unique_gene_clust_labels = np.unique(gene_clust_labels)
-        gene_cluster_selected_genes = [[]] * unique_gene_clust_labels.shape[0]
-        gene_cluster_embeddings = [[]] * unique_gene_clust_labels.shape[0]
+    if specific_cluster is None:
+        unique_gene_clust_labels = xp.unique(gene_clust_labels)
     else:
-        unique_gene_clust_labels = np.array([specific_cluster])
-        gene_cluster_selected_genes = [[]] * unique_gene_clust_labels.shape[0]
-        gene_cluster_embeddings = [[]] * unique_gene_clust_labels.shape[0]
-    for i in np.arange(unique_gene_clust_labels.shape[0]):
-        print(
-            "Plotting cell UMAP using gene clusters " + str(unique_gene_clust_labels[i])
-        )
-        selected_genes = np.asarray(
-            top_ESS_genes[
-                np.where(np.isin(gene_clust_labels, unique_gene_clust_labels[i]))[0]
-            ]
-        )
-        gene_cluster_selected_genes[i] = selected_genes
-        # np.save(path + "Saved_ESFS_Genes.npy",np.asarray(selected_genes))
+        unique_gene_clust_labels = [specific_cluster]
+    # Create containers for the selected genes and embeddings
+    gene_cluster_selected_genes = []
+    gene_cluster_embeddings = []
+
+    for lbl in unique_gene_clust_labels:
+        print(f"Plotting cell UMAP using gene cluster {lbl}")
+        selected_genes = top_ESS_genes[gene_clust_labels == lbl].tolist()
+        if len(selected_genes) == 0:
+            print(f"No genes found in cluster {lbl}, skipping this cluster.")
+            # Add to maintain the list length
+            gene_cluster_embeddings.append(None)
+            gene_cluster_selected_genes.append([])
+            continue
+        gene_cluster_selected_genes.append(selected_genes)
+        # xp.save(path + "Saved_ESFS_Genes.npy",xp.asarray(selected_genes))
         reduced_input_data = adata[:, selected_genes].X.A
         if log_transformed:
             reduced_input_data = xp.log2(reduced_input_data + 1)
@@ -1819,33 +1822,32 @@ def get_gene_cluster_cell_UMAPs(
             metric="correlation",
             min_dist=min_dist,
             n_components=2,
+            **kwargs,
         ).fit(reduced_input_data)
-        gene_cluster_embeddings[i] = embedding_model.embedding_
+        gene_cluster_embeddings.append(embedding_model.embedding_)
         #
     return gene_cluster_embeddings, gene_cluster_selected_genes
 
 
 def plot_gene_cluster_cell_UMAPs(
     adata,
-    gene_cluster_embeddings,
-    gene_cluster_selected_genes,
+    gene_cluster_embeddings: list,
+    gene_cluster_selected_genes: list,
     cell_label="None",
     ncol=1,
     log2_gene_expression=True,
 ):
     #
-    if np.isin(cell_label, adata.obs.columns):
+    breakpoint()
+    # TODO: Refactor this to move away from strings as we have done prev with `get_gene_cluster_cell_UMAPs`
+    if cell_label in adata.obs.columns:
         cell_labels = adata.obs[cell_label]
         unique_cell_labels = xp.unique(cell_labels)
         #
-        for i in np.arange(len(gene_cluster_embeddings)):
-            embedding = gene_cluster_embeddings[i]
+        for i, embedding in enumerate(gene_cluster_embeddings):
             plt.figure(figsize=(7, 5))
             plt.title(
-                "Cell UMAP"
-                + "\n"
-                + str(gene_cluster_selected_genes[i].shape[0])
-                + " genes",
+                "Cell UMAP" + "\n" + str(len(gene_cluster_selected_genes[i])) + " genes",
                 fontsize=20,
             )
             for j in xp.arange(unique_cell_labels.shape[0]):
@@ -1874,7 +1876,8 @@ def plot_gene_cluster_cell_UMAPs(
                     markerscale=5,
                 )
     #
-    if np.isin(cell_label, adata.var.index):
+    breakpoint()
+    if xp.isin(cell_label, adata.var.index):
         #
         expression = adata[:, cell_label].X.T
         if xpsparse.issparse(expression):
@@ -1890,9 +1893,7 @@ def plot_gene_cluster_cell_UMAPs(
             plt.figure(figsize=(7, 5))
             plt.title("Cell UMAP" + "\n" + cell_label, fontsize=20)
             #
-            plt.scatter(
-                embedding[:, 0], embedding[:, 1], s=3, c=expression, cmap="seismic"
-            )
+            plt.scatter(embedding[:, 0], embedding[:, 1], s=3, c=expression, cmap="seismic")
             #
             plt.xlabel("UMAP 1", fontsize=16)
             plt.ylabel("UMAP 2", fontsize=16)
@@ -1951,4 +1952,3 @@ def plot_gene_cluster_cell_UMAPs(
 #             display(Image(data=f.read(), format='png'))
 
 ######
-
