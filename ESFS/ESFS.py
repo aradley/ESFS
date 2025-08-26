@@ -138,9 +138,19 @@ def parallel_calc_es_matrices(
     )
     ## Parallel compute
     with np.errstate(divide="ignore", invalid="ignore"):
-        if use_cores == 1:
-            # Single core: run sequentially for easier debugging
-            Results = [
+        if USING_GPU:
+            results = calc_es_metrics_vec(
+                feature_inds,
+                sample_cardinality=sample_cardinality,
+                feature_sums=feature_sums,
+                minority_states=minority_states,
+            )
+        elif use_cores == 1:
+            # Single core: run sequentially for easier debugging (only)
+            warnings.warn(
+                "Running ESFS in single-core mode. This is not recommended for large datasets as it will be slow. Set use_cores to -1 or a positive integer to parallelize."
+            )
+            results = [
                 calc_es_metrics(
                     ind,
                     sample_cardinality=sample_cardinality,
@@ -151,7 +161,7 @@ def parallel_calc_es_matrices(
             ]
         else:
             # Multi-core: use parallel processing
-            Results = p_map(
+            results = p_map(
                 partial(
                     calc_es_metrics,
                     sample_cardinality=sample_cardinality,
@@ -162,7 +172,10 @@ def parallel_calc_es_matrices(
                 num_cpus=use_cores,
             )
     ## Unpack results
-    Results = np.asarray(Results)
+    results = xp.asarray(results)
+    # NOTE: GPU code gives (4, samples, samples) shape, while CPU gives (samples, 4, samples), so align
+    if USING_GPU:
+        results = xp.moveaxis(results, 0, 1)
     ## Save outputs requested by the save_matrices paramater
     if "ESSs" in save_matrices:
         ESSs = results[:, 0, :]
@@ -305,7 +318,7 @@ def calc_es_metrics(feature_ind, sample_cardinality, feature_sums, minority_stat
         FF_QF_vs_RF,
     )
     ## Having extracted the overlaps and their respective ESEs (1-4), calcualte the ESS and EPs
-    ESSs, D_EPs, O_EPs, SWs, SGs = calc_ESSs(
+    ESSs, D_EPs, O_EPs, SWs, SGs = calc_ESSs_old(
         RFms,
         QFms,
         RFMs,
@@ -316,10 +329,121 @@ def calc_es_metrics(feature_ind, sample_cardinality, feature_sums, minority_stat
         all_use_cases,
         all_used_inds,
     )
-    identical_features = np.where(ESSs == 1)[0]
+    identical_features = xp.nonzero(ESSs == 1)[0]
     D_EPs[identical_features] = 0
     O_EPs[identical_features] = 0
     EPs = nanmaximum(D_EPs, O_EPs)
+    return ESSs, EPs, SWs, SGs
+
+
+def calc_es_metrics_vec(feature_inds, sample_cardinality, feature_sums, minority_states):
+    """
+    This function calcualtes the ES metrics for one of the features in the secondary_features object against
+    every variable/feature in the adata object.
+
+    `feature_ind` - Indicates the column of secondary_features being used.
+    `sample_cardinality` - Inherited scalar of the number of samples in adata.
+    `feature_sums` - Inherited vector of the columns sums of adata.
+    `minority_states` - Inherited vector of the minority state sums of each column of adata.
+    """
+    ## Extract the Fixed Feature (FF)
+    fixed_features = secondary_features[:, feature_inds]
+    fixed_features_cardinality = fixed_features.toarray().sum(axis=0)
+    fixed_feature_minority_states = fixed_features_cardinality.copy()
+    idxs = fixed_feature_minority_states >= (sample_cardinality / 2)
+    if idxs.any():
+        fixed_feature_minority_states[idxs] = (
+            sample_cardinality - fixed_feature_minority_states[idxs]
+        )
+    ## Identify where FF is the QF or RF
+    FF_QF_vs_RF = fixed_feature_minority_states[:, None] > minority_states[None, :]
+    ## Calculate the QFms, RFms, RFMs and QFMs for each FF and secondary feature pair
+    RFms = xp.where(~FF_QF_vs_RF, fixed_feature_minority_states[:, None], minority_states[None, :])
+    QFms = xp.where(FF_QF_vs_RF, fixed_feature_minority_states[:, None], minority_states[None, :])
+    RFMs = sample_cardinality - RFms
+    QFMs = sample_cardinality - QFms
+
+    ## Calculate the values of (x) that correspond to the maximum for each overlap scenario (mm, Mm, mM and MM) (m = minority, M = majority)
+    max_ent_x_mm = (RFms * QFms) / (RFms + RFMs)
+    max_ent_x_Mm = (QFMs * RFms) / (RFms + RFMs)
+    max_ent_x_mM = (RFMs * QFms) / (RFms + RFMs)
+    max_ent_x_MM = (RFMs * QFMs) / (RFms + RFMs)
+    max_ent_options = xp.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
+    ######
+    ## Calculate the overlap between the FF states and the secondary features
+    all_ESSs = []
+    all_EPs = []
+    all_SWs = []
+    all_SGs = []
+    overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup = get_overlap_info_vec(
+        fixed_features,
+        fixed_features_cardinality,
+        sample_cardinality,
+        feature_sums,
+        FF_QF_vs_RF,
+    )
+
+    @np.errstate(divide="ignore", invalid="ignore")
+    def ess_worker(i, xp_mod=xp):
+        return calc_ESSs(
+            RFms[i],
+            QFms[i],
+            RFMs[i],
+            QFMs[i],
+            max_ent_options[:, i, :],
+            sample_cardinality,
+            overlaps[i],
+            inverse_overlaps[i],
+            case_idxs[i],
+            case_patterns,
+            overlap_lookup,
+            xp_mod=xp_mod,
+        )
+
+    results = []
+
+    if USING_GPU:
+        # NOTE: Use numpy for this part for now until calc_ESS is vectorised for cupy
+        RFms = xp.asnumpy(RFms)
+        QFms = xp.asnumpy(QFms)
+        RFMs = xp.asnumpy(RFMs)
+        QFMs = xp.asnumpy(QFMs)
+        max_ent_options = xp.asnumpy(max_ent_options)
+        overlaps = xp.asnumpy(overlaps)
+        inverse_overlaps = xp.asnumpy(inverse_overlaps)
+        case_idxs = xp.asnumpy(case_idxs)
+        case_patterns = xp.asnumpy(case_patterns)
+        overlap_lookup = xp.asnumpy(overlap_lookup)
+        feature_inds = xp.asnumpy(feature_inds)
+        ess_worker = partial(ess_worker, xp_mod=np)
+
+    # NOTE: Parallelising this didn't make a difference (processes or threads), but cupy overhead did so still need numpy conversion for now
+    for i in tqdm(feature_inds):
+        results.append(ess_worker(i))
+
+    # Extract and process results
+    for ESSs, D_EPs, O_EPs, SWs, SGs in results:
+        # Convert back to cupy
+        if USING_GPU:
+            ESSs = xp.asarray(ESSs)
+            D_EPs = xp.asarray(D_EPs)
+            O_EPs = xp.asarray(O_EPs)
+            SWs = xp.asarray(SWs)
+            SGs = xp.asarray(SGs)
+        identical_features = xp.where(ESSs == 1)[0]
+        D_EPs[identical_features] = 0
+        O_EPs[identical_features] = 0
+        EPs = nanmaximum(D_EPs, O_EPs)
+        all_ESSs.append(ESSs)
+        all_EPs.append(EPs)
+        all_SWs.append(SWs)
+        all_SGs.append(SGs)
+
+    ## Stack the results into a single array
+    ESSs = xp.stack(all_ESSs, axis=0)
+    EPs = xp.stack(all_EPs, axis=0)
+    SWs = xp.stack(all_SWs, axis=0)
+    SGs = xp.stack(all_SGs, axis=0)
     return ESSs, EPs, SWs, SGs
 
 
@@ -338,151 +462,662 @@ def get_overlap_info(
     """
     ## Set up an array to track which of ESE equations 1-4 the recorded observed overlap relates to (row), and if it is
     # native correlation (1) or flipped anti-correlation (-1). Row 1 = mm, row 2 = Mm, row 3 = mM, row 4 = MM.
-    all_use_cases = np.zeros((4, feature_sums.shape[0]))
+    all_use_cases = xp.zeros((4, feature_sums.shape[0]))
     ## Set up an array to track the observed overlaps between the FF and the secondary features.
-    all_overlaps_options = np.zeros((4, feature_sums.shape[0]))
+    all_overlaps_options = xp.zeros((4, feature_sums.shape[0]))
     ## Set up a list to track the used inds/features for each ESE
-    all_used_inds = [[]] * 4
+    all_used_inds = [[] for _ in range(4)]
     ####
     ## Pairwise calculate total overlaps of FF values with the values every other a feature in adata
-    nonzero_inds = np.where(fixed_feature != 0)[0]
+    nonzero_inds = xp.where(fixed_feature != 0)[0]
     sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    B = csc_matrix(
+    # NOTE: Could remove .T[0] if remove [:, None] from fixed_feature, need to check downstream
+    B = xpsparse.csc_matrix(
         (
             fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
             sub_global_scaled_matrix.indices,
             sub_global_scaled_matrix.indptr,
         )
     )
-    overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
+    if USING_GPU:
+        overlaps = sub_global_scaled_matrix.minimum(B.tocsr()).sum(axis=0)[0]
+    else:
+        overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
     ## Pairwise calculate total overlaps of Inverse FF values with the values every other a feature in adata
-    inverse_fixed_feature = 1 - fixed_feature  # np.max(fixed_feature) - fixed_feature
-    nonzero_inds = np.where(inverse_fixed_feature != 0)[0]
+    inverse_fixed_feature = 1 - fixed_feature  # xp.max(fixed_feature) - fixed_feature
+    nonzero_inds = xp.where(inverse_fixed_feature != 0)[0]
     sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    B = csc_matrix(
+    B = xpsparse.csc_matrix(
         (
             inverse_fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
             sub_global_scaled_matrix.indices,
             sub_global_scaled_matrix.indptr,
         )
     )
-    inverse_overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
+    if USING_GPU:
+        inverse_overlaps = sub_global_scaled_matrix.minimum(B.tocsr()).sum(axis=0)[0]
+    else:
+        inverse_overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
     ####
     ### Using the logical rules of ES to work out which ESE should be used for each pair of features beign compared.
     ## If FF is observed in it's minority state, use the following 4 steps to caclulate overlaps with every other feature
     if fixed_feature_cardinality < (sample_cardinality / 2):
         #######
         ## FF and other feature are minority states & FF is QF
-        calc_idxs = np.where(
-            (feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1)
-        )[0]
+        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
         ## Track which features are observed as mm (row 1), and which are mM when the secondary feature is flipped (row 3)
-        all_use_cases[:, calc_idxs] = np.array([1, -1, 0, 0]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([1, -1, 0, 0]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[0, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = np.append(all_used_inds[0], calc_idxs)
+        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
         all_overlaps_options[1, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = np.append(all_used_inds[1], calc_idxs)
+        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
         #######
         ## FF and other feature are minority states & FF is RF
-        calc_idxs = np.where(
-            (feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0)
-        )[0]
+        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
         ## Track which features are observed as mm (row 1), and which are Mm when the secondary feature is flipped (row 2)
-        all_use_cases[:, calc_idxs] = np.array([1, 0, -1, 0]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([1, 0, -1, 0]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[0, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = np.append(all_used_inds[0], calc_idxs)
+        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
         all_overlaps_options[2, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = np.append(all_used_inds[2], calc_idxs)
+        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
         #######
         ## FF is minority, other feature is majority & FF is QF
-        calc_idxs = np.where(
-            (feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1)
-        )[0]
+        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
         ## Track which features are observed as mM (row 4), and which are mm when the secondary feature is flipped (row 1)
-        all_use_cases[:, calc_idxs] = np.array([0, 0, 1, -1]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([0, 0, 1, -1]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[3, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = np.append(all_used_inds[3], calc_idxs)
+        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
         all_overlaps_options[2, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = np.append(all_used_inds[2], calc_idxs)
+        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
         #######
         ## FF is minority, other feature is majority & FF is RF
-        calc_idxs = np.where(
-            (feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0)
-        )[0]
+        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
         ## Track which features are observed as Mm (row 2), and which are mm when the secondary feature is flipped (row 1)
-        all_use_cases[:, calc_idxs] = np.array([0, 1, 0, -1]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([0, 1, 0, -1]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[3, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = np.append(all_used_inds[3], calc_idxs)
+        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
         all_overlaps_options[1, calc_idxs] = overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = np.append(all_used_inds[1], calc_idxs)
+        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
         #
     ## If FF is observed in it's majority state, use the following 4 steps to caclulate overlaps with every other feature
     if fixed_feature_cardinality >= (sample_cardinality / 2):
         #######
         ## FF is majority, other feature is minority & FF is QF
-        calc_idxs = np.where(
-            (feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1)
-        )[0]
+        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
         ## Track which features are observed as Mm (row 2), and which are MM when the secondary feature is flipped (row 4)
-        all_use_cases[:, calc_idxs] = np.array([-1, 1, 0, 0]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([-1, 1, 0, 0]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[1, calc_idxs] = overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = np.append(all_used_inds[1], calc_idxs)
+        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
         all_overlaps_options[0, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = np.append(all_used_inds[0], calc_idxs)
+        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
         #######
         ## FF is majority, other feature is minority & FF is RF
-        calc_idxs = np.where(
-            (feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0)
-        )[0]
+        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
         ## Track which features are observed as mM (row 3), and which are MM when the secondary feature is flipped (row 4)
-        all_use_cases[:, calc_idxs] = np.array([-1, 0, 1, 0]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([-1, 0, 1, 0]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[2, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = np.append(all_used_inds[2], calc_idxs)
+        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
         all_overlaps_options[0, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = np.append(all_used_inds[0], calc_idxs)
+        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
         #######
         ## FF is majority, other feature is majority & FF is QF
-        calc_idxs = np.where(
-            (feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1)
-        )[0]
+        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
         ## Track which features are observed as MM (row 4), and which are Mm when the secondary feature is flipped (row 2)
-        all_use_cases[:, calc_idxs] = np.array([0, 0, -1, 1]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([0, 0, -1, 1]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[2, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = np.append(all_used_inds[2], calc_idxs)
+        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
         all_overlaps_options[3, calc_idxs] = overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = np.append(all_used_inds[3], calc_idxs)
+        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
         #######
         ## FF is majority, other feature is majority & FF is RF
-        calc_idxs = np.where(
-            (feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0)
-        )[0]
+        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
         ## Track which features are observed as MM (row 4), and which are mM when the secondary feature is flipped (row 3)
-        all_use_cases[:, calc_idxs] = np.array([0, -1, 0, 1]).reshape(4, 1)
+        all_use_cases[:, calc_idxs] = xp.array([0, -1, 0, 1]).reshape(4, 1)
         ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
         # and Global_Scaled_Matrix_Inverse for inverse observations.
         all_overlaps_options[1, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = np.append(all_used_inds[1], calc_idxs)
+        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
         all_overlaps_options[3, calc_idxs] = overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = np.append(all_used_inds[3], calc_idxs)
+        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
         #
     return all_use_cases, all_overlaps_options, all_used_inds
 
 
+def get_overlap_info_vec(
+    fixed_features, fixed_features_cardinality, sample_cardinality, feature_sums, FF_QF_vs_RF
+):
+    """
+    For any pair of features the ES mathematical framework has a set of logical rules regarding how the ES metrics
+    should be calcualted. These logical rules dictate which of the two features is the reference feature (RF) or query feature
+    (QF) and which of the 4 Entropy Sort Equations (ESE 1-4) should be used (Add reference to supplemental figure of
+    new manuscript when ready).
+    """
+    ## Pairwise calculate total overlaps of FF values with the values every other a feature in adata
+    if USING_GPU:
+        overlaps = xp.zeros((fixed_features.shape[1], feature_sums.shape[0]), dtype=xp.float32)
+        kernel = overlaps_cuda()
+        block = (16, 16)
+        grid = (
+            (fixed_features.shape[1] + block[0] - 1) // block[0],
+            (feature_sums.shape[0] + block[1] - 1) // block[1],
+        )
+        kernel(
+            grid,
+            block,
+            (
+                xp.asfortranarray(fixed_features.todense()).astype(xp.float32).ravel(order="F"),
+                global_scaled_matrix.data.astype(xp.float32),
+                global_scaled_matrix.indices,
+                global_scaled_matrix.indptr,
+                overlaps.ravel(),
+                fixed_features.shape[0],
+                fixed_features.shape[1],
+                feature_sums.shape[0],
+            ),
+        )
+    else:
+        overlaps = overlaps_cpu(fixed_features.toarray(), global_scaled_matrix)
+
+    if USING_GPU:
+        inverse_overlaps = xp.zeros(
+            (fixed_features.shape[1], feature_sums.shape[0]), dtype=xp.float32
+        )
+        kernel = overlaps_cuda()
+        kernel(
+            grid,
+            block,
+            (
+                xp.asfortranarray((1 - fixed_features.todense()).astype(xp.float32)).ravel(
+                    order="F"
+                ),
+                global_scaled_matrix.data.astype(xp.float32),
+                global_scaled_matrix.indices,
+                global_scaled_matrix.indptr,
+                inverse_overlaps.ravel(),
+                fixed_features.shape[0],
+                fixed_features.shape[1],
+                feature_sums.shape[0],
+            ),
+        )
+    else:
+        inverse_overlaps = overlaps_cpu(1 - fixed_features.toarray(), global_scaled_matrix)
+
+    # Calculate our ineqs and reshape for broadcasting
+    ff_is_min = (fixed_features_cardinality < (sample_cardinality / 2))[:, None]
+    sf_is_min = (feature_sums < (sample_cardinality / 2))[None, :]
+    # Map each case to its corresponding indices
+    case_patterns = xp.array(
+        [
+            [0, -1, 0, 1],  # case_8: ff=0, sf=0, FF_QF_vs_RF=0
+            [0, 0, -1, 1],  # case_7: ff=0, sf=0, FF_QF_vs_RF=1
+            [-1, 0, 1, 0],  # case_6: ff=0, sf=1, FF_QF_vs_RF=0
+            [-1, 1, 0, 0],  # case_5: ff=0, sf=1, FF_QF_vs_RF=1
+            [0, 1, 0, -1],  # case_4: ff=1, sf=0, FF_QF_vs_RF=0
+            [0, 0, 1, -1],  # case_3: ff=1, sf=0, FF_QF_vs_RF=1
+            [1, 0, -1, 0],  # case_2: ff=1, sf=1, FF_QF_vs_RF=0
+            [1, -1, 0, 0],  # case_1: ff=1, sf=1, FF_QF_vs_RF=1
+        ],
+        dtype=xp.int8,
+    )
+    # Shift to get 4/2/1 for each case, mapping to indices for the cases defined above
+    # NOTE: These ints are the indices of the case_patterns array, NOT the case number, i.e. 7 = case_1
+    case_idxs = (
+        (ff_is_min.astype(int) << 2) + (sf_is_min.astype(int) << 1) + FF_QF_vs_RF.astype(int)
+    ).astype(xp.int8)
+    # Get the rows for each case where we insert the overlaps (+1) and inverse overlaps (-1)
+    row_map = xp.stack(
+        [xp.argmax(case_patterns, axis=1), xp.argmin(case_patterns, axis=1)],
+        axis=1,
+        dtype=xp.int8,
+    )
+    # Now define a lookup table for which overlap to use
+    # 0 = overlaps, 1 = inverse_overlaps, -1 = not relevant
+    overlap_lookup = xp.full((8, 4), -1, dtype=xp.int8)
+    # Insert the overlaps and inverse overlaps for each case for each col (mm, Mm, mM, MM)
+    # NOTE: put_along_axis is availabile in cupy v14, which is prerelease at the time of writing
+    # So we just drop down to numpy and convert back to cupy until it's in stable release to avoid issues
+    if USING_GPU:
+        # Convert to numpy
+        overlap_lookup = xp.asnumpy(overlap_lookup).astype(xp.int8)
+        row_map = xp.asnumpy(row_map).astype(xp.int8)
+        # Run using numpy explicitly
+        np.put_along_axis(overlap_lookup, row_map, [0, 1], axis=1)
+        # Convert back to cupy
+        overlap_lookup = xp.asarray(overlap_lookup, dtype=xp.int8)
+        row_map = xp.asarray(row_map, dtype=xp.int8)
+    else:
+        xp.put_along_axis(overlap_lookup, row_map, [0, 1], axis=1)
+    # Now return the overlaps, and what we need to extract everything needed for ESS calcs later
+    return overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup
+
+
+def overlaps_cuda():
+    kernel_code = r"""
+    extern "C" __global__
+    void compute_overlaps(const float* fixed_features,
+                        const float* data,
+                        const int* indices,
+                        const int* indptr,
+                        float* overlaps,
+                        int n_samples,
+                        int n_fixed_features,
+                        int n_features) {
+        int i = blockIdx.x * blockDim.x + threadIdx.x;  // fixed_feature index
+        int j = blockIdx.y * blockDim.y + threadIdx.y;  // feature index
+
+        if (i >= n_fixed_features || j >= n_features) return;
+
+        float sum = 0.0f;
+        int start = indptr[j];
+        int end = indptr[j + 1];
+
+        for (int k = start; k < end; ++k) {
+            int row = indices[k]; 
+            float ff_val = fixed_features[row + i * n_samples];
+            if (ff_val != 0.0f) {
+                float gs_val = data[k];
+                sum += fminf(ff_val, gs_val);
+            }
+        }
+
+        overlaps[i * n_features + j] = sum;
+    }
+    """
+
+    module = xp.RawModule(code=kernel_code)
+    return module.get_function("compute_overlaps")
+
+
+def overlaps_cpu(fixed_features, global_scaled_matrix):
+    """
+    Non-vectorised CPU version of overlaps calculation for when GPU is not available using original code.
+    """
+    all_overlaps = []
+
+    for i in tqdm(range(fixed_features.shape[1]), desc="Calculating overlaps"):
+        fixed_feature = fixed_features[:, i]
+        nonzero_inds = xp.where(fixed_feature != 0)[0]
+        sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
+        # NOTE: Could remove .T[0] if remove [:, None] from fixed_feature, need to check downstream
+        B = xpsparse.csc_matrix(
+            (
+                fixed_feature[nonzero_inds].T[sub_global_scaled_matrix.indices],
+                sub_global_scaled_matrix.indices,
+                sub_global_scaled_matrix.indptr,
+            )
+        )
+        overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
+        all_overlaps.append(overlaps.astype(xp.float64))
+
+    return xp.stack(all_overlaps, axis=0)
+
+
+# TODO: Vectorise this function
 def calc_ESSs(
+    RFms,
+    QFms,
+    RFMs,
+    QFMs,
+    max_ent_options,
+    sample_cardinality,
+    overlaps,
+    inverse_overlaps,
+    case_idxs,
+    case_patterns,
+    overlap_lookup,
+    xp_mod: Optional[ModuleType] = None,
+):
+    """
+    Now that we have all of the values required for ES caclulations (RFms, QFms, RFMs, QFMs, max_ent_options) and
+    have determined which ESE should be used for each pair of features (case_idxs, case_patterns, and overlap_lookup),
+    we may calculated the ES metrics for the FF against every other feature in adata.
+    """
+    # If no module specified, use the default xp
+    # NOTE: We do this to allow for numpy workaround as this is not vectorised and cupy'd
+    if xp_mod is None:
+        xp_mod = xp
+    ## Create variables to track caclulation outputs
+    all_ESSs = xp_mod.zeros((4, RFms.shape[0]))
+    all_D_EPs = xp_mod.zeros((4, RFms.shape[0]))
+    all_O_EPs = xp_mod.zeros((4, RFms.shape[0]))
+    all_SGs = xp_mod.zeros((4, RFms.shape[0]))
+    all_SWs = xp_mod.zeros((4, RFms.shape[0]))
+    ###################
+    ##### (1)  mm #####
+    use_curve = 0
+    ## Find the FF/SF pairs where we should use ESE (1) to calculate entropies
+    # NOTE: We add xp_mod.atleast_1d in the rare case 1 index is found, which gets reduced to 0 dims
+    calc_idxs = xp_mod.atleast_1d(
+        xp_mod.argwhere(case_patterns[case_idxs, use_curve] != 0).squeeze()
+    )
+    if calc_idxs.shape[0] > 0:
+        # Retrieve the max_ent, Min_x, Max_X and observed overlap values
+        curve_case_idxs, curve_overlaps, max_ent_x, SD_1_idxs, SD1_idxs, SDs, D, O = common_curve(
+            use_curve,
+            calc_idxs,
+            case_idxs,
+            overlap_lookup,
+            overlaps,
+            inverse_overlaps,
+            max_ent_options,
+            xp_mod=xp_mod,
+        )
+        min_overlap = xp_mod.zeros_like(calc_idxs)
+        max_overlap = RFms[calc_idxs]
+        ind_X_1 = max_ent_x - min_overlap
+        ind_X1 = max_overlap - max_ent_x
+        D[SD_1_idxs] = curve_overlaps[SD_1_idxs]
+        O[SD_1_idxs] = (
+            sample_cardinality
+            - (RFms[calc_idxs][SD_1_idxs] + QFms[calc_idxs][SD_1_idxs])
+            + curve_overlaps[SD_1_idxs]
+        )
+        D[SD1_idxs] = RFms[calc_idxs][SD1_idxs] - curve_overlaps[SD1_idxs]
+        O[SD1_idxs] = QFms[calc_idxs][SD1_idxs] - curve_overlaps[SD1_idxs]
+        # Perform caclulations with ESE (1)
+        CE, ind_E, min_E = ESE1(
+            curve_overlaps,
+            SDs,
+            RFms[calc_idxs],
+            RFMs[calc_idxs],
+            QFms[calc_idxs],
+            QFMs[calc_idxs],
+            sample_cardinality,
+            max_overlap,
+            xp_mod=xp_mod,
+        )
+        #
+        SWs = (ind_E - min_E) / ind_E
+        SGs = (ind_E - CE) / (ind_E - min_E)
+        # Because of float errors the following inequality at the boundary sometimes fails, (CE[Test] < min_E[Test]), leading to values greater than 1. It is valid to just correct them to 1.
+        SGs[SGs > 1] = 1
+        # Because of float errors the following inequality at the maximum sometimes fails, (CE[Test] > ind_E[Test]), leading to values greater than less than 0. It is valid to just correct them to 0.
+        SGs[SGs < 0] = 0
+        #
+        ESS = SWs * SGs * SDs * case_patterns[curve_case_idxs, use_curve]
+        all_ESSs[use_curve, calc_idxs] = ESS
+        all_SWs[use_curve, calc_idxs] = SWs
+        all_SGs[use_curve, calc_idxs] = SGs
+        #
+        SD_1_IndEnt = ind_E[SD_1_idxs] / ind_X_1[SD_1_idxs]
+        SD1_IndEnt = ind_E[SD1_idxs] / ind_X1[SD1_idxs]
+        #
+        D_EPs = xp_mod.zeros(ind_E.shape[0])
+        D_EPs[SD_1_idxs] = ((CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]) - SD_1_IndEnt
+        D_EPs[SD1_idxs] = ((CE[SD1_idxs] - min_E[SD1_idxs]) / D[SD1_idxs]) - SD1_IndEnt
+        #
+        O_EPs = xp_mod.zeros(ind_E.shape[0])
+        O_EPs[SD_1_idxs] = ((CE[SD_1_idxs]) / O[SD_1_idxs]) - SD_1_IndEnt
+        O_EPs[SD1_idxs] = ((CE[SD1_idxs]) / O[SD1_idxs]) - SD1_IndEnt
+        #
+        all_D_EPs[use_curve, calc_idxs] = D_EPs
+        all_O_EPs[use_curve, calc_idxs] = O_EPs
+        #
+    ###################
+    ##### (2)  Mm #####
+    use_curve = 1
+    ## Find the FF/SF pairs where we should use ESE (2) to calculate entropies
+    calc_idxs = xp_mod.atleast_1d(
+        xp_mod.argwhere(case_patterns[case_idxs, use_curve] != 0).squeeze()
+    )
+    if calc_idxs.shape[0] > 0:
+        # Retrieve the max_ent, Min_x, Max_X and observed overlap values
+        curve_case_idxs, curve_overlaps, max_ent_x, SD_1_idxs, SD1_idxs, SDs, D, O = common_curve(
+            use_curve,
+            calc_idxs,
+            case_idxs,
+            overlap_lookup,
+            overlaps,
+            inverse_overlaps,
+            max_ent_options,
+            xp_mod=xp_mod,
+        )
+        min_overlap = xp_mod.zeros_like(calc_idxs)
+        max_overlap = xp_mod.minimum(RFms[calc_idxs], QFMs[calc_idxs])
+        ind_X_1 = max_ent_x - min_overlap
+        ind_X1 = max_overlap - max_ent_x
+        D[SD_1_idxs] = curve_overlaps[SD_1_idxs]
+        O[SD_1_idxs] = (
+            QFms[calc_idxs][SD_1_idxs] - RFms[calc_idxs][SD_1_idxs] + curve_overlaps[SD_1_idxs]
+        )
+        D[SD1_idxs] = RFms[calc_idxs][SD1_idxs] - curve_overlaps[SD1_idxs]
+        O[SD1_idxs] = QFMs[calc_idxs][SD1_idxs] - RFms[calc_idxs][SD1_idxs] + D[SD1_idxs]
+        # Perform caclulations with ESE (2)
+        CE, ind_E, min_E = ESE2(
+            curve_overlaps,
+            SDs,
+            RFms[calc_idxs],
+            RFMs[calc_idxs],
+            QFms[calc_idxs],
+            QFMs[calc_idxs],
+            sample_cardinality,
+            xp_mod=xp_mod,
+        )
+        #
+        SWs = (ind_E - min_E) / ind_E
+        SGs = (ind_E - CE) / (ind_E - min_E)
+        # Because of float errors the following inequality at the boundary sometimes fails, (CE[Test] < min_E[Test]), leading to values greater than 1. It is valid to just correct them to 1.
+        SGs[SGs > 1] = 1
+        # Because of float errors the following inequality at the maximum sometimes fails, (CE[Test] > ind_E[Test]), leading to values greater than less than 0. It is valid to just correct them to 0.
+        SGs[SGs < 0] = 0
+        #
+        ESS = SWs * SGs * SDs * case_patterns[curve_case_idxs, use_curve]
+        all_ESSs[use_curve, calc_idxs] = ESS
+        all_SWs[use_curve, calc_idxs] = SWs
+        all_SGs[use_curve, calc_idxs] = SGs
+        #
+        SD_1_IndEnt = ind_E[SD_1_idxs] / ind_X_1[SD_1_idxs]
+        SD1_IndEnt = ind_E[SD1_idxs] / ind_X1[SD1_idxs]
+        #
+        D_EPs = xp_mod.zeros(ind_E.shape[0])
+        D_EPs[SD_1_idxs] = ((CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]) - SD_1_IndEnt
+        D_EPs[SD1_idxs] = ((CE[SD1_idxs] - min_E[SD1_idxs]) / D[SD1_idxs]) - SD1_IndEnt
+        #
+        O_EPs = xp_mod.zeros(ind_E.shape[0])
+        O_EPs[SD_1_idxs] = ((CE[SD_1_idxs]) / O[SD_1_idxs]) - SD_1_IndEnt
+        O_EPs[SD1_idxs] = ((CE[SD1_idxs]) / O[SD1_idxs]) - SD1_IndEnt
+        #
+        all_D_EPs[use_curve, calc_idxs] = D_EPs
+        all_O_EPs[use_curve, calc_idxs] = O_EPs
+        #
+    ###################
+    ##### (3)  mM #####
+    use_curve = 2
+    ## Find the FF/SF pairs where we should use ESE (3) to calculate entropies
+    calc_idxs = xp_mod.atleast_1d(
+        xp_mod.argwhere(case_patterns[case_idxs, use_curve] != 0).squeeze()
+    )
+    if calc_idxs.shape[0] > 0:
+        # Retrieve the max_ent, Min_x, Max_X and observed overlap values
+        curve_case_idxs, curve_overlaps, max_ent_x, SD_1_idxs, SD1_idxs, SDs, D, O = common_curve(
+            use_curve,
+            calc_idxs,
+            case_idxs,
+            overlap_lookup,
+            overlaps,
+            inverse_overlaps,
+            max_ent_options,
+            xp_mod=xp_mod,
+        )
+        min_overlap = RFMs[calc_idxs] - QFMs[calc_idxs]
+        max_overlap = xp_mod.minimum(QFms[calc_idxs], RFMs[calc_idxs])
+        ind_X_1 = max_ent_x - min_overlap
+        ind_X1 = max_overlap - max_ent_x
+        D[SD_1_idxs] = (
+            QFMs[calc_idxs][SD_1_idxs] - RFMs[calc_idxs][SD_1_idxs] + curve_overlaps[SD_1_idxs]
+        )
+        O[SD_1_idxs] = curve_overlaps[SD_1_idxs]
+        D[SD1_idxs] = QFms[calc_idxs][SD1_idxs] - curve_overlaps[SD1_idxs]
+        O[SD1_idxs] = RFMs[calc_idxs][SD1_idxs] - curve_overlaps[SD1_idxs]
+        # Perform caclulations with ESE (3)
+        CE, ind_E, min_E = ESE3(
+            curve_overlaps,
+            SDs,
+            RFms[calc_idxs],
+            RFMs[calc_idxs],
+            QFms[calc_idxs],
+            QFMs[calc_idxs],
+            sample_cardinality,
+            min_overlap,
+            xp_mod=xp_mod,
+        )
+        #
+        SWs = (ind_E - min_E) / ind_E
+        SGs = (ind_E - CE) / (ind_E - min_E)
+        # Because of float errors the following inequality at the boundary sometimes fails, (CE[Test] < min_E[Test]), leading to values greater than 1. It is valid to just correct them to 1.
+        SGs[SGs > 1] = 1
+        # Because of float errors the following inequality at the maximum sometimes fails, (CE[Test] > ind_E[Test]), leading to values greater than less than 0. It is valid to just correct them to 0.
+        SGs[SGs < 0] = 0
+        #
+        ESS = SWs * SGs * SDs * case_patterns[curve_case_idxs, use_curve]
+        all_ESSs[use_curve, calc_idxs] = ESS
+        all_SWs[use_curve, calc_idxs] = SWs
+        all_SGs[use_curve, calc_idxs] = SGs
+        #
+        SD_1_IndEnt = ind_E[SD_1_idxs] / ind_X_1[SD_1_idxs]
+        SD1_IndEnt = ind_E[SD1_idxs] / ind_X1[SD1_idxs]
+        #
+        D_EPs = xp_mod.zeros(ind_E.shape[0])
+        D_EPs[SD_1_idxs] = ((CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]) - SD_1_IndEnt
+        D_EPs[SD1_idxs] = ((CE[SD1_idxs] - min_E[SD1_idxs]) / D[SD1_idxs]) - SD1_IndEnt
+        #
+        O_EPs = xp_mod.zeros(ind_E.shape[0])
+        O_EPs[SD_1_idxs] = ((CE[SD_1_idxs]) / O[SD_1_idxs]) - SD_1_IndEnt
+        O_EPs[SD1_idxs] = ((CE[SD1_idxs]) / O[SD1_idxs]) - SD1_IndEnt
+        #
+        all_D_EPs[use_curve, calc_idxs] = D_EPs
+        all_O_EPs[use_curve, calc_idxs] = O_EPs
+        #
+    ###################
+    ##### (4)  MM #####
+
+    use_curve = 3
+    ## Find the FF/SF pairs where we should use ESE (4) to calculate entropies
+    calc_idxs = xp_mod.atleast_1d(
+        xp_mod.argwhere(case_patterns[case_idxs, use_curve] != 0).squeeze()
+    )
+    if calc_idxs.shape[0] > 0:
+        # Retrieve the max_ent, Min_x, Max_X and observed overlap values
+        curve_case_idxs, curve_overlaps, max_ent_x, SD_1_idxs, SD1_idxs, SDs, D, O = common_curve(
+            use_curve,
+            calc_idxs,
+            case_idxs,
+            overlap_lookup,
+            overlaps,
+            inverse_overlaps,
+            max_ent_options,
+            xp_mod=xp_mod,
+        )
+        min_overlap = QFMs[calc_idxs] - RFms[calc_idxs]
+        max_overlap = xp_mod.minimum(QFMs[calc_idxs], RFMs[calc_idxs])
+        ind_X_1 = max_ent_x - min_overlap
+        ind_X1 = max_overlap - max_ent_x
+        D[SD_1_idxs] = curve_overlaps[SD_1_idxs] - (
+            sample_cardinality - (QFms[calc_idxs][SD_1_idxs] + RFms[calc_idxs][SD_1_idxs])
+        )
+        O[SD_1_idxs] = curve_overlaps[SD_1_idxs]
+        D[SD1_idxs] = QFMs[calc_idxs][SD1_idxs] - curve_overlaps[SD1_idxs]
+        O[SD1_idxs] = RFMs[calc_idxs][SD1_idxs] - QFMs[calc_idxs][SD1_idxs] + D[SD1_idxs]
+        # Perform caclulations with ESE (4)
+        CE, ind_E, min_E = ESE4(
+            curve_overlaps,
+            SDs,
+            RFms[calc_idxs],
+            RFMs[calc_idxs],
+            QFms[calc_idxs],
+            QFMs[calc_idxs],
+            sample_cardinality,
+            min_overlap,
+            max_overlap,
+            xp_mod=xp_mod,
+        )
+        #
+        SWs = (ind_E - min_E) / ind_E
+        SGs = (ind_E - CE) / (ind_E - min_E)
+        # Because of float errors the following inequality at the boundary sometimes fails, (CE[Test] < min_E[Test]), leading to values greater than 1. It is valid to just correct them to 1.
+        SGs[SGs > 1] = 1
+        # Because of float errors the following inequality at the maximum sometimes fails, (CE[Test] > ind_E[Test]), leading to values greater than less than 0. It is valid to just correct them to 0.
+        SGs[SGs < 0] = 0
+        #
+        ESS = SWs * SGs * SDs * case_patterns[curve_case_idxs, use_curve]
+        all_ESSs[use_curve, calc_idxs] = ESS
+        all_SWs[use_curve, calc_idxs] = SWs
+        all_SGs[use_curve, calc_idxs] = SGs
+        #
+        SD_1_IndEnt = ind_E[SD_1_idxs] / ind_X_1[SD_1_idxs]
+        SD1_IndEnt = ind_E[SD1_idxs] / ind_X1[SD1_idxs]
+        #
+        D_EPs = xp_mod.zeros(ind_E.shape[0])
+        D_EPs[SD_1_idxs] = ((CE[SD_1_idxs] - min_E[SD_1_idxs]) / D[SD_1_idxs]) - SD_1_IndEnt
+        D_EPs[SD1_idxs] = ((CE[SD1_idxs] - min_E[SD1_idxs]) / D[SD1_idxs]) - SD1_IndEnt
+        #
+        O_EPs = xp_mod.zeros(ind_E.shape[0])
+        O_EPs[SD_1_idxs] = ((CE[SD_1_idxs]) / O[SD_1_idxs]) - SD_1_IndEnt
+        O_EPs[SD1_idxs] = ((CE[SD1_idxs]) / O[SD1_idxs]) - SD1_IndEnt
+        #
+        all_D_EPs[use_curve, calc_idxs] = D_EPs
+        all_O_EPs[use_curve, calc_idxs] = O_EPs
+        #
+    ########
+    ## For each feature pair, accept the orientation with the maximum ESS as it is the least likely to have occoured by chance.
+    max_ESS_idxs = xp_mod.nanargmax(xp_mod.absolute(all_ESSs), axis=0)
+    ## Return results
+    return (
+        all_ESSs[max_ESS_idxs, xp_mod.arange(RFms.shape[0])],
+        all_D_EPs[max_ESS_idxs, xp_mod.arange(RFms.shape[0])],
+        all_O_EPs[max_ESS_idxs, xp_mod.arange(RFms.shape[0])],
+        all_SWs[max_ESS_idxs, xp_mod.arange(RFms.shape[0])],
+        all_SGs[max_ESS_idxs, xp_mod.arange(RFms.shape[0])],
+    )
+
+
+def common_curve(
+    use_curve,
+    calc_idxs,
+    case_idxs,
+    overlap_lookup,
+    overlaps,
+    inverse_overlaps,
+    max_ent_options,
+    xp_mod,
+):
+    """
+    Abstract out some common code just to improve readability
+    """
+    curve_case_idxs = case_idxs[calc_idxs]
+    overlap_source = overlap_lookup[curve_case_idxs, use_curve]
+    # NOTE: Promote dtype here to increase stability and alignment with original code
+    # Without this, max_ESS_idxs can be different for some features
+    curve_overlaps = xp_mod.where(
+        overlap_source == 0, overlaps[calc_idxs], inverse_overlaps[calc_idxs]
+    ).astype(xp_mod.float64)
+    max_ent_x = max_ent_options[use_curve, calc_idxs]
+    #
+    SD_1_idxs = xp_mod.where(curve_overlaps < max_ent_x)[0]
+    SD1_idxs = xp_mod.where(curve_overlaps >= max_ent_x)[0]
+    SDs = xp_mod.zeros(calc_idxs.shape[0]) - 1
+    SDs[SD1_idxs] = 1
+    #
+    D = xp_mod.zeros(calc_idxs.shape[0])
+    O = xp_mod.zeros(calc_idxs.shape[0])
+    return curve_case_idxs, curve_overlaps, max_ent_x, SD_1_idxs, SD1_idxs, SDs, D, O
+
+
+def calc_ESSs_old(
     RFms,
     QFms,
     RFMs,
@@ -543,6 +1178,7 @@ def calc_ESSs(
             QFMs[calc_idxs],
             sample_cardinality,
             max_overlap,
+            xp_mod=xp,
         )
         #
         SWs = (ind_E - min_E) / ind_E
@@ -605,6 +1241,7 @@ def calc_ESSs(
             QFms[calc_idxs],
             QFMs[calc_idxs],
             sample_cardinality,
+            xp_mod=xp,
         )
         #
         SWs = (ind_E - min_E) / ind_E
@@ -668,6 +1305,7 @@ def calc_ESSs(
             QFMs[calc_idxs],
             sample_cardinality,
             min_overlap,
+            xp_mod=xp,
         )
         #
         SWs = (ind_E - min_E) / ind_E
@@ -734,6 +1372,7 @@ def calc_ESSs(
             sample_cardinality,
             min_overlap,
             max_overlap,
+            xp_mod=xp,
         )
         #
         SWs = (ind_E - min_E) / ind_E
@@ -764,228 +1403,204 @@ def calc_ESSs(
         #
     ########
     ## For each feature pair, accept the orientation with the maximum ESS as it is the least likely to have occoured by chance.
-    max_ESS_idxs = np.nanargmax(np.absolute(all_ESSs), axis=0)
+    max_ESS_idxs = xp.nanargmax(xp.absolute(all_ESSs), axis=0)
     ## Return results
     return (
-        all_ESSs[max_ESS_idxs, np.arange(RFms.shape[0])],
-        all_D_EPs[max_ESS_idxs, np.arange(RFms.shape[0])],
-        all_O_EPs[max_ESS_idxs, np.arange(RFms.shape[0])],
-        all_SWs[max_ESS_idxs, np.arange(RFms.shape[0])],
-        all_SGs[max_ESS_idxs, np.arange(RFms.shape[0])],
+        all_ESSs[max_ESS_idxs, xp.arange(RFms.shape[0])],
+        all_D_EPs[max_ESS_idxs, xp.arange(RFms.shape[0])],
+        all_O_EPs[max_ESS_idxs, xp.arange(RFms.shape[0])],
+        all_SWs[max_ESS_idxs, xp.arange(RFms.shape[0])],
+        all_SGs[max_ESS_idxs, xp.arange(RFms.shape[0])],
     )
 
 
-def ESE1(x, SD, RFm, RFM, QFm, QFM, Ts, max_overlap):
+def ESE1(x, SD, RFm, RFM, QFm, QFM, Ts, max_overlap, xp_mod):
     """
     This function takes the observed inputs and uses the ESE1 formulation of ES to caclulate the observed Conditional Entropy (CE),
     Independent Entropy (ind_E) and Minimum Entropy (min_E).
     """
     G1_E = (RFm / Ts) * (
-        (((x) / RFm) * (-np.log((x) / RFm)))
-        + (((RFm - x) / RFm) * (-np.log((RFm - x) / RFm)))
+        (((x) / RFm) * (-xp_mod.log((x) / RFm)))
+        + (((RFm - x) / RFm) * (-xp_mod.log((RFm - x) / RFm)))
     )
     G2_E = (RFM / Ts) * (
-        (((QFm - x) / RFM) * (-np.log((QFm - x) / RFM)))
-        + (((RFM - QFm + x) / RFM) * (-np.log((RFM - QFm + x) / RFM)))
+        (((QFm - x) / RFM) * (-xp_mod.log((QFm - x) / RFM)))
+        + (((RFM - QFm + x) / RFM) * (-xp_mod.log((RFM - QFm + x) / RFM)))
     )
-    CE = np.where(np.isnan(G1_E), 0, G1_E) + np.where(np.isnan(G2_E), 0, G2_E)
-    ind_E = (QFm / Ts) * (-np.log((QFm / Ts))) + (QFM / Ts) * (-np.log((QFM / Ts)))
+    CE = xp_mod.where(xp_mod.isnan(G1_E), 0, G1_E) + xp_mod.where(xp_mod.isnan(G2_E), 0, G2_E)
+    ind_E = (QFm / Ts) * (-xp_mod.log((QFm / Ts))) + (QFM / Ts) * (-xp_mod.log((QFM / Ts)))
     #
-    min_E = np.zeros(SD.shape[0])
-    SD_1_idxs = np.where(SD == -1)[0]
+    min_E = xp_mod.zeros(SD.shape[0])
+    SD_1_idxs = xp_mod.where(SD == -1)[0]
     min_E[SD_1_idxs] = (RFM[SD_1_idxs] / Ts) * (
-        (
-            ((QFm[SD_1_idxs]) / RFM[SD_1_idxs])
-            * (-np.log((QFm[SD_1_idxs]) / RFM[SD_1_idxs]))
-        )
+        (((QFm[SD_1_idxs]) / RFM[SD_1_idxs]) * (-xp_mod.log((QFm[SD_1_idxs]) / RFM[SD_1_idxs])))
         + (
             ((RFM[SD_1_idxs] - QFm[SD_1_idxs]) / RFM[SD_1_idxs])
-            * (-np.log((RFM[SD_1_idxs] - QFm[SD_1_idxs]) / RFM[SD_1_idxs]))
+            * (-xp_mod.log((RFM[SD_1_idxs] - QFm[SD_1_idxs]) / RFM[SD_1_idxs]))
         )
     )
-    SD1_idxs = np.where(SD == 1)[0]
+    SD1_idxs = xp_mod.where(SD == 1)[0]
     min_E[SD1_idxs] = (RFM[SD1_idxs] / Ts) * (
         (
             ((QFm[SD1_idxs] - max_overlap[SD1_idxs]) / RFM[SD1_idxs])
-            * (-np.log((QFm[SD1_idxs] - max_overlap[SD1_idxs]) / RFM[SD1_idxs]))
+            * (-xp_mod.log((QFm[SD1_idxs] - max_overlap[SD1_idxs]) / RFM[SD1_idxs]))
         )
         + (
             ((RFM[SD1_idxs] - QFm[SD1_idxs] + max_overlap[SD1_idxs]) / RFM[SD1_idxs])
-            * (
-                -np.log(
-                    (RFM[SD1_idxs] - QFm[SD1_idxs] + max_overlap[SD1_idxs])
-                    / RFM[SD1_idxs]
-                )
-            )
+            * (-xp_mod.log((RFM[SD1_idxs] - QFm[SD1_idxs] + max_overlap[SD1_idxs]) / RFM[SD1_idxs]))
         )
     )
-    min_E[np.isnan(min_E)] = 0
-    min_E[np.isnan(min_E)] = 0
+    min_E[xp_mod.isnan(min_E)] = 0
+    min_E[xp_mod.isnan(min_E)] = 0
     #
-    CE[np.isnan(CE)] = min_E[np.isnan(CE)]
+    CE[xp_mod.isnan(CE)] = min_E[xp_mod.isnan(CE)]
     return CE, ind_E, min_E
 
 
-def ESE2(x, SD, RFm, RFM, QFm, QFM, Ts):
+def ESE2(x, SD, RFm, RFM, QFm, QFM, Ts, xp_mod):
     """
     This function takes the observed inputs and uses the ESE2 formulation of ES to caclulate the observed Conditional Entropy (CE),
     Independent Entropy (ind_E) and Minimum Entropy (min_E).
     """
     G1_E = (RFm / Ts) * (
-        (
-            -(((RFm - x) / RFm) * np.log((RFm - x) / RFm))
-            - (((x) / RFm) * np.log((x) / RFm))
-        )
+        (-(((RFm - x) / RFm) * xp_mod.log((RFm - x) / RFm)) - (((x) / RFm) * xp_mod.log((x) / RFm)))
     )
     G2_E = (RFM / Ts) * (
         (
-            -(((RFM - QFM + x) / RFM) * np.log((RFM - QFM + x) / RFM))
-            - (((QFM - x) / RFM) * np.log((QFM - x) / RFM))
+            -(((RFM - QFM + x) / RFM) * xp_mod.log((RFM - QFM + x) / RFM))
+            - (((QFM - x) / RFM) * xp_mod.log((QFM - x) / RFM))
         )
     )
-    CE = np.where(np.isnan(G1_E), 0, G1_E) + np.where(np.isnan(G2_E), 0, G2_E)
-    ind_E = (QFm / Ts) * (-np.log((QFm / Ts))) + (QFM / Ts) * (-np.log((QFM / Ts)))
+    CE = xp_mod.where(xp_mod.isnan(G1_E), 0, G1_E) + xp_mod.where(xp_mod.isnan(G2_E), 0, G2_E)
+    ind_E = (QFm / Ts) * (-xp_mod.log((QFm / Ts))) + (QFM / Ts) * (-xp_mod.log((QFM / Ts)))
     #
-    min_E = np.zeros(SD.shape[0])
-    SD_1_idxs = np.where(SD == -1)[0]
+    min_E = xp_mod.zeros(SD.shape[0])
+    SD_1_idxs = xp_mod.where(SD == -1)[0]
     min_E[SD_1_idxs] = (RFM[SD_1_idxs] / Ts) * (
         (
             -(
                 ((RFM[SD_1_idxs] - QFM[SD_1_idxs]) / RFM[SD_1_idxs])
-                * np.log((RFM[SD_1_idxs] - QFM[SD_1_idxs]) / RFM[SD_1_idxs])
+                * xp_mod.log((RFM[SD_1_idxs] - QFM[SD_1_idxs]) / RFM[SD_1_idxs])
             )
-            - (
-                ((QFM[SD_1_idxs]) / RFM[SD_1_idxs])
-                * np.log((QFM[SD_1_idxs]) / RFM[SD_1_idxs])
-            )
+            - (((QFM[SD_1_idxs]) / RFM[SD_1_idxs]) * xp_mod.log((QFM[SD_1_idxs]) / RFM[SD_1_idxs]))
         )
     )
-    SD1_idxs = np.where(SD == 1)[0]
+    SD1_idxs = xp_mod.where(SD == 1)[0]
     min_E[SD1_idxs] = (RFM[SD1_idxs] / Ts) * (
         (
             -(
                 ((RFM[SD1_idxs] - QFM[SD1_idxs] + RFm[SD1_idxs]) / RFM[SD1_idxs])
-                * np.log(
-                    (RFM[SD1_idxs] - QFM[SD1_idxs] + RFm[SD1_idxs]) / RFM[SD1_idxs]
-                )
+                * xp_mod.log((RFM[SD1_idxs] - QFM[SD1_idxs] + RFm[SD1_idxs]) / RFM[SD1_idxs])
             )
             - (
                 ((QFM[SD1_idxs] - RFm[SD1_idxs]) / RFM[SD1_idxs])
-                * np.log((QFM[SD1_idxs] - RFm[SD1_idxs]) / RFM[SD1_idxs])
+                * xp_mod.log((QFM[SD1_idxs] - RFm[SD1_idxs]) / RFM[SD1_idxs])
             )
         )
     )
-    min_E[np.isnan(min_E)] = 0
+    min_E[xp_mod.isnan(min_E)] = 0
     #
-    CE[np.isnan(CE)] = min_E[np.isnan(CE)]
+    CE[xp_mod.isnan(CE)] = min_E[xp_mod.isnan(CE)]
     return CE, ind_E, min_E
 
 
-def ESE3(x, SD, RFm, RFM, QFm, QFM, Ts, min_overlap):
+def ESE3(x, SD, RFm, RFM, QFm, QFM, Ts, min_overlap, xp_mod):
     """
     This function takes the observed inputs and uses the ESE3 formulation of ES to caclulate the observed Conditional Entropy (CE),
     Independent Entropy (ind_E) and Minimum Entropy (min_E).
     """
     G1_E = (RFm / Ts) * (
         (
-            -(((QFm - x) / RFm) * np.log((QFm - x) / RFm))
-            - (((RFm - QFm + x) / RFm) * np.log((RFm - QFm + x) / RFm))
+            -(((QFm - x) / RFm) * xp_mod.log((QFm - x) / RFm))
+            - (((RFm - QFm + x) / RFm) * xp_mod.log((RFm - QFm + x) / RFm))
         )
     )
     G2_E = (RFM / Ts) * (
-        (
-            -(((x) / RFM) * np.log((x) / RFM))
-            - (((RFM - x) / RFM) * np.log((RFM - x) / RFM))
-        )
+        (-(((x) / RFM) * xp_mod.log((x) / RFM)) - (((RFM - x) / RFM) * xp_mod.log((RFM - x) / RFM)))
     )
-    CE = np.where(np.isnan(G1_E), 0, G1_E) + np.where(np.isnan(G2_E), 0, G2_E)
-    ind_E = (QFm / Ts) * (-np.log((QFm / Ts))) + (QFM / Ts) * (-np.log((QFM / Ts)))
+    CE = xp_mod.where(xp_mod.isnan(G1_E), 0, G1_E) + xp_mod.where(xp_mod.isnan(G2_E), 0, G2_E)
+    ind_E = (QFm / Ts) * (-xp_mod.log((QFm / Ts))) + (QFM / Ts) * (-xp_mod.log((QFM / Ts)))
     #
-    min_E = np.zeros(SD.shape[0])
-    SD_1_idxs = np.where(SD == -1)[0]
+    min_E = xp_mod.zeros(SD.shape[0])
+    SD_1_idxs = xp_mod.where(SD == -1)[0]
     min_E[SD_1_idxs] = (RFM[SD_1_idxs] / Ts) * (
         (
             -(
                 ((min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
-                * np.log((min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
+                * xp_mod.log((min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
             )
             - (
                 ((RFM[SD_1_idxs] - min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
-                * np.log((RFM[SD_1_idxs] - min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
+                * xp_mod.log((RFM[SD_1_idxs] - min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
             )
         )
     )
-    SD1_idxs = np.where(SD == 1)[0]
+    SD1_idxs = xp_mod.where(SD == 1)[0]
     min_E[SD1_idxs] = (RFM[SD1_idxs] / Ts) * (
         (
             -(
                 ((RFM[SD1_idxs] - QFM[SD1_idxs] + RFm[SD1_idxs]) / RFM[SD1_idxs])
-                * np.log(
-                    (RFM[SD1_idxs] - QFM[SD1_idxs] + RFm[SD1_idxs]) / RFM[SD1_idxs]
-                )
+                * xp_mod.log((RFM[SD1_idxs] - QFM[SD1_idxs] + RFm[SD1_idxs]) / RFM[SD1_idxs])
             )
             - (
                 ((QFM[SD1_idxs] - RFm[SD1_idxs]) / RFM[SD1_idxs])
-                * np.log((QFM[SD1_idxs] - RFm[SD1_idxs]) / RFM[SD1_idxs])
+                * xp_mod.log((QFM[SD1_idxs] - RFm[SD1_idxs]) / RFM[SD1_idxs])
             )
         )
     )
-    min_E[np.isnan(min_E)] = 0
+    min_E[xp_mod.isnan(min_E)] = 0
     #
-    CE[np.isnan(CE)] = min_E[np.isnan(CE)]
+    CE[xp_mod.isnan(CE)] = min_E[xp_mod.isnan(CE)]
     return CE, ind_E, min_E
 
 
-def ESE4(x, SD, RFm, RFM, QFm, QFM, Ts, min_overlap, max_overlap):
+def ESE4(x, SD, RFm, RFM, QFm, QFM, Ts, min_overlap, max_overlap, xp_mod):
     """
     This function takes the observed inputs and uses the ESE4 formulation of ES to caclulate the observed Conditional Entropy (CE),
     Independent Entropy (ind_E) and Minimum Entropy (min_E).
     """
     G1_E = (RFm / Ts) * (
         (
-            -(((RFm - QFM + x) / RFm) * np.log((RFm - QFM + x) / RFm))
-            - (((QFM - x) / RFm) * np.log((QFM - x) / RFm))
+            -(((RFm - QFM + x) / RFm) * xp_mod.log((RFm - QFM + x) / RFm))
+            - (((QFM - x) / RFm) * xp_mod.log((QFM - x) / RFm))
         )
     )
     G2_E = (RFM / Ts) * (
-        (
-            -(((RFM - x) / RFM) * np.log((RFM - x) / RFM))
-            - (((x) / RFM) * np.log((x) / RFM))
-        )
+        (-(((RFM - x) / RFM) * xp_mod.log((RFM - x) / RFM)) - (((x) / RFM) * xp_mod.log((x) / RFM)))
     )
-    CE = np.where(np.isnan(G1_E), 0, G1_E) + np.where(np.isnan(G2_E), 0, G2_E)
-    ind_E = (QFm / Ts) * (-np.log((QFm / Ts))) + (QFM / Ts) * (-np.log((QFM / Ts)))
+    CE = xp_mod.where(xp_mod.isnan(G1_E), 0, G1_E) + xp_mod.where(xp_mod.isnan(G2_E), 0, G2_E)
+    ind_E = (QFm / Ts) * (-xp_mod.log((QFm / Ts))) + (QFM / Ts) * (-xp_mod.log((QFM / Ts)))
     #
-    min_E = np.zeros(SD.shape[0])
-    SD_1_idxs = np.where(SD == -1)[0]
+    min_E = xp_mod.zeros(SD.shape[0])
+    SD_1_idxs = xp_mod.where(SD == -1)[0]
     min_E[SD_1_idxs] = (RFM[SD_1_idxs] / Ts) * (
         (
             -(
                 ((RFM[SD_1_idxs] - min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
-                * np.log((RFM[SD_1_idxs] - min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
+                * xp_mod.log((RFM[SD_1_idxs] - min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
             )
             - (
                 ((min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
-                * np.log((min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
+                * xp_mod.log((min_overlap[SD_1_idxs]) / RFM[SD_1_idxs])
             )
         )
     )
-    SD1_idxs = np.where(SD == 1)[0]
+    SD1_idxs = xp_mod.where(SD == 1)[0]
     min_E[SD1_idxs] = (RFM[SD1_idxs] / Ts) * (
         (
             -(
                 ((RFM[SD1_idxs] - max_overlap[SD1_idxs]) / RFM[SD1_idxs])
-                * np.log((RFM[SD1_idxs] - max_overlap[SD1_idxs]) / RFM[SD1_idxs])
+                * xp_mod.log((RFM[SD1_idxs] - max_overlap[SD1_idxs]) / RFM[SD1_idxs])
             )
             - (
                 ((max_overlap[SD1_idxs]) / RFM[SD1_idxs])
-                * np.log((max_overlap[SD1_idxs]) / RFM[SD1_idxs])
+                * xp_mod.log((max_overlap[SD1_idxs]) / RFM[SD1_idxs])
             )
         )
     )
-    min_E[np.isnan(min_E)] = 0
+    min_E[xp_mod.isnan(min_E)] = 0
     #
-    CE[np.isnan(CE)] = min_E[np.isnan(CE)]
+    CE[xp_mod.isnan(CE)] = min_E[xp_mod.isnan(CE)]
     return CE, ind_E, min_E
 
 
@@ -1197,7 +1812,6 @@ def identify_max_ESSs(FF_ind, secondary_features, sorted_SGs_idxs):
         all_overlaps_options,
         all_use_cases,
         all_used_inds,
-        debug,
     )
     # EPs = xp.maximum(D_EPs,O_EPs)
     identical_features = xp.where(ESSs == 1)[0]
