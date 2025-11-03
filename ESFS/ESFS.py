@@ -25,7 +25,7 @@ try:
 
     # Secondarily check if CUDA is available, in case it's run on e.g. different HPC partitions
     try:
-        if cupy.cuda.is_available():
+        if xp.cuda.is_available():
             USING_GPU = True
         else:
             warnings.warn(
