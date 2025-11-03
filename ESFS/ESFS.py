@@ -18,12 +18,32 @@ from sklearn.cluster import KMeans, HDBSCAN
 from tqdm import tqdm
 import umap
 
-# If installed, use CuPy for GPU acceleration
+# If installed and in right env, use CuPy for GPU acceleration
 try:
     import cupy as xp
     import cupyx.scipy.sparse as xpsparse
 
-    USING_GPU = True
+    # Secondarily check if CUDA is available, in case it's run on e.g. different HPC partitions
+    try:
+        if cupy.cuda.is_available():
+            USING_GPU = True
+        else:
+            warnings.warn(
+                "CuPy is installed but CUDA is not available. ESFS will run on CPU, which may be slower for large datasets."
+            )
+            xp = np
+            xpsparse = spsparse
+            USING_GPU = False
+    # Needed because cupy.cuda.is_available() can raise exceptions
+    # NOTE: This will be fixed in cupy v14
+    # https://github.com/cupy/cupy/pull/9420
+    except Exception as e:
+        warnings.warn(
+            "CuPy is installed but CUDA availability could not be determined. ESFS will run on CPU, which may be slower for large datasets."
+        )
+        xp = np
+        xpsparse = spsparse
+        USING_GPU = False
 except ImportError:
     warnings.warn(
         "CuPy is not installed. ESFS will run on CPU, which may be slower for large datasets."
