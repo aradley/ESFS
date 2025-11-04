@@ -5,6 +5,7 @@ from functools import partial
 from types import ModuleType
 from typing import Optional
 import warnings
+import os, psutil
 
 import anndata as ad
 import matplotlib.pyplot as plt
@@ -12,10 +13,12 @@ import multiprocess
 import numpy as np
 import pandas as pd
 from p_tqdm import p_map
+from pathos.pools import ProcessPool
+import joblib
 import scipy.sparse as spsparse
 from scipy.spatial.distance import pdist, squareform
 from sklearn.cluster import KMeans, HDBSCAN
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import umap
 
 # If installed and in right env, use CuPy for GPU acceleration
@@ -117,7 +120,7 @@ def parallel_calc_es_matrices(
     `use_cores` defines how many CPU cores to use. Is use_cores = -1, the software will use N-1 the number of cores available on the machine.
     """
     ## Establish which secondary_features will be compared against each of the features in adata
-    global secondary_features
+    # global secondary_features
     if secondary_features_label == "Self":
         secondary_features = adata.layers["Scaled_Counts"].copy()
     else:
@@ -127,7 +130,7 @@ def parallel_calc_es_matrices(
         secondary_features = adata.obsm[secondary_features_label]
     #
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
-    global global_scaled_matrix
+    # global global_scaled_matrix
     global_scaled_matrix = adata.layers["Scaled_Counts"]
     ## Extract sample and feature cardinality
     sample_cardinality = global_scaled_matrix.shape[0]
@@ -177,20 +180,37 @@ def parallel_calc_es_matrices(
                     feature_sums=feature_sums,
                     minority_states=minority_states,
                 )
-                for ind in feature_inds
+                for ind in tqdm(feature_inds)
             ]
         else:
             # Multi-core: use parallel processing
-            results = p_map(
-                partial(
-                    calc_es_metrics,
-                    sample_cardinality=sample_cardinality,
-                    feature_sums=feature_sums,
-                    minority_states=minority_states,
-                ),
-                feature_inds,
-                num_cpus=use_cores,
+            f = partial(
+                calc_es_metrics,
+                sample_cardinality=sample_cardinality,
+                feature_sums=feature_sums,
+                minority_states=minority_states,
+                secondary_features=secondary_features,
+                global_scaled_matrix=global_scaled_matrix,
             )
+            # with ProcessPool(nodes=use_cores) as pool:
+            #     # with ThreadPool(nodes=use_cores) as pool:
+            #     results = []
+            #     for res in tqdm(
+            #         pool.imap(f, feature_inds),
+            #         total=len(feature_inds),
+            #     ):
+            #         results.append(res)
+            #     pool.clear()
+
+            results = [
+                r
+                for r in tqdm(
+                    joblib.Parallel(n_jobs=use_cores, return_as="generator")(
+                        joblib.delayed(f)(ind) for ind in feature_inds
+                    ),
+                    total=len(feature_inds),
+                )
+            ]
     ## Unpack results
     results = xp.asarray(results)
     # NOTE: GPU code gives (4, samples, samples) shape, while CPU gives (samples, 4, samples), so align
@@ -292,7 +312,14 @@ def nanmaximum(arr1, arr2):
     return result
 
 
-def calc_es_metrics(feature_ind, sample_cardinality, feature_sums, minority_states):
+def calc_es_metrics(
+    feature_ind,
+    sample_cardinality,
+    feature_sums,
+    minority_states,
+    secondary_features,
+    global_scaled_matrix,
+):
     """
     This function calcualtes the ES metrics for one of the features in the secondary_features object against
     every variable/feature in the adata object.
@@ -336,6 +363,7 @@ def calc_es_metrics(feature_ind, sample_cardinality, feature_sums, minority_stat
         sample_cardinality,
         feature_sums,
         FF_QF_vs_RF,
+        global_scaled_matrix,
     )
     ## Having extracted the overlaps and their respective ESEs (1-4), calcualte the ESS and EPs
     ESSs, D_EPs, O_EPs, SWs, SGs = calc_ESSs_old(
@@ -353,6 +381,8 @@ def calc_es_metrics(feature_ind, sample_cardinality, feature_sums, minority_stat
     D_EPs[identical_features] = 0
     O_EPs[identical_features] = 0
     EPs = nanmaximum(D_EPs, O_EPs)
+    # proc = psutil.Process(os.getpid())
+    # print(f"Worker {feature_ind}: {proc.memory_info().rss / 1e6:.2f} MB")
     return ESSs, EPs, SWs, SGs
 
 
@@ -473,6 +503,7 @@ def get_overlap_info(
     sample_cardinality,
     feature_sums,
     FF_QF_vs_RF,
+    global_scaled_matrix,
 ):
     """
     For any pair of features the ES mathematical framework has a set of logical rules regarding how the ES metrics
