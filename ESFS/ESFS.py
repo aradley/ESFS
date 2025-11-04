@@ -177,7 +177,7 @@ def parallel_calc_es_matrices(
                     feature_sums=feature_sums,
                     minority_states=minority_states,
                 )
-                for ind in feature_inds
+                for ind in tqdm(feature_inds)
             ]
         else:
             # Multi-core: use parallel processing
