@@ -782,11 +782,12 @@ def calc_ESSs_vec(
     n_feats = RFms.shape[0]
     n_comps = RFms.shape[1]
     # Create output arrays, with NaNs for easier later masking/maximum selection
-    all_ESSs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan)
-    all_D_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan)
-    all_O_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan)
-    all_SGs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan)
-    all_SWs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan)
+    # NOTE: Using float32 to save memory, should be sufficient precision
+    all_ESSs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
+    all_D_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
+    all_O_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
+    all_SGs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
+    all_SWs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
 
     for use_curve in range(4):
         curve_mask = case_patterns[case_idxs, use_curve] != 0
@@ -806,8 +807,9 @@ def calc_ESSs_vec(
         )
         ind_X_1 = max_ent_x - min_overlap
         ind_X1 = max_overlap - max_ent_x
-        D = xp_mod.zeros((n_feats, n_comps))
-        O = xp_mod.zeros((n_feats, n_comps))
+        # NOTE: Again, force float32 to save memory
+        D = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
+        O = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
         if use_curve == 0:
             # TODO: Check that this one-liner can be done, both generally and vectorised
             D = xp_mod.where(SD_1_mask, curve_overlaps, RFms - curve_overlaps)
@@ -869,7 +871,12 @@ def calc_ESSs_vec(
                 curve_mask,
                 xp_mod,
             )
-        ESS, SWs, SGs, D_EPs, O_EPs = common_ES_metrics_batched(
+        all_ESSs, all_SWs, all_SGs, all_D_EPs, all_O_EPs = common_ES_metrics_batched(
+            all_ESSs,
+            all_SWs,
+            all_SGs,
+            all_D_EPs,
+            all_O_EPs,
             ind_E,
             min_E,
             CE,
@@ -886,12 +893,6 @@ def calc_ESSs_vec(
             curve_mask,
             xp_mod,
         )
-        # Store results for this curve (only where mask is True)
-        all_ESSs[use_curve] = ESS
-        all_SWs[use_curve] = SWs
-        all_SGs[use_curve] = SGs
-        all_D_EPs[use_curve] = D_EPs
-        all_O_EPs[use_curve] = O_EPs
     # For each feature pair, accept the orientation with the maximum ESS as it is the least likely to have occurred by chance.
     max_ESS_idxs = xp_mod.nanargmax(xp_mod.absolute(all_ESSs), axis=0)
     # Gather results using advanced indexing
