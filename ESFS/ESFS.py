@@ -133,10 +133,12 @@ def parallel_calc_es_matrices(
     sample_cardinality = global_scaled_matrix.shape[0]
     ## Calculate feature sums and minority states for each adata feature
     # NOTE: .A is needed here for scipy, but incompatible with cupy.
+    global feature_sums
     if not USING_GPU:
         feature_sums = global_scaled_matrix.sum(axis=0).A[0]
     else:
         feature_sums = global_scaled_matrix.sum(axis=0)[0]
+    global minority_states
     minority_states = feature_sums.copy()
     idxs = xp.where(minority_states >= (sample_cardinality / 2))[0]
     minority_states[idxs] = sample_cardinality - minority_states[idxs]
@@ -174,23 +176,22 @@ def parallel_calc_es_matrices(
                 calc_es_metrics(
                     ind,
                     sample_cardinality=sample_cardinality,
-                    feature_sums=feature_sums,
-                    minority_states=minority_states,
                 )
                 for ind in tqdm(feature_inds)
             ]
         else:
             # Multi-core: use parallel processing
-            results = p_map(
-                partial(
-                    calc_es_metrics,
-                    sample_cardinality=sample_cardinality,
-                    feature_sums=feature_sums,
-                    minority_states=minority_states,
-                ),
-                feature_inds,
-                num_cpus=use_cores,
-            )
+            with ProcessPool(nodes=use_cores) as pool:
+                results = []
+                for res in tqdm(
+                    pool.imap(
+                        partial(calc_es_metrics, sample_cardinality=sample_cardinality),
+                        feature_inds,
+                    ),
+                    total=len(feature_inds),
+                ):
+                    results.append(res)
+                pool.clear()
     ## Unpack results
     results = xp.asarray(results)
     # NOTE: GPU code gives (4, samples, samples) shape, while CPU gives (samples, 4, samples), so align
@@ -292,7 +293,7 @@ def nanmaximum(arr1, arr2):
     return result
 
 
-def calc_es_metrics(feature_ind, sample_cardinality, feature_sums, minority_states):
+def calc_es_metrics(feature_ind, sample_cardinality):
     """
     This function calcualtes the ES metrics for one of the features in the secondary_features object against
     every variable/feature in the adata object.
