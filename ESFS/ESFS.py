@@ -771,28 +771,34 @@ def overlaps_cuda():
     return module.get_function("compute_overlaps")
 
 
-def overlaps_cpu(fixed_features, global_scaled_matrix):
+def overlaps_cpu_parallel(i, fixed_features):
     """
     Non-vectorised CPU version of overlaps calculation for when GPU is not available using original code.
     """
-    all_overlaps = []
-
-    for i in tqdm(range(fixed_features.shape[1]), desc="Calculating overlaps"):
-        fixed_feature = fixed_features[:, i]
-        nonzero_inds = xp.where(fixed_feature != 0)[0]
-        sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-        # NOTE: Could remove .T[0] if remove [:, None] from fixed_feature, need to check downstream
-        B = xpsparse.csc_matrix(
-            (
-                fixed_feature[nonzero_inds].T[sub_global_scaled_matrix.indices],
-                sub_global_scaled_matrix.indices,
-                sub_global_scaled_matrix.indptr,
-            )
+    fixed_feature = fixed_features[:, i]
+    nonzero_inds = xp.where(fixed_feature != 0)[0]
+    sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
+    # NOTE: Could remove .T[0] if remove [:, None] from fixed_feature, need to check downstream
+    B = xpsparse.csc_matrix(
+        (
+            fixed_feature[nonzero_inds].T[sub_global_scaled_matrix.indices],
+            sub_global_scaled_matrix.indices,
+            sub_global_scaled_matrix.indptr,
         )
-        overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
-        all_overlaps.append(overlaps.astype(xp.float64))
-
-    return xp.stack(all_overlaps, axis=0)
+    )
+    overlap = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
+    fixed_feature = 1 - fixed_feature
+    nonzero_inds = xp.where(fixed_feature != 0)[0]
+    sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
+    B = xpsparse.csc_matrix(
+        (
+            fixed_feature[nonzero_inds].T[sub_global_scaled_matrix.indices],
+            sub_global_scaled_matrix.indices,
+            sub_global_scaled_matrix.indptr,
+        )
+    )
+    inv_overlap = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
+    return overlap.astype(xp.float64), inv_overlap.astype(xp.float64)
 
 
 # TODO: Vectorise this function
