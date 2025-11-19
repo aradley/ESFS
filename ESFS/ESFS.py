@@ -358,7 +358,9 @@ def calc_es_metrics(feature_ind, sample_cardinality):
     return ESSs, EPs, SWs, SGs
 
 
-def calc_es_metrics_vec(feature_inds, sample_cardinality, feature_sums, minority_states):
+def calc_es_metrics_vec(
+    feature_inds, sample_cardinality, feature_sums, minority_states, num_cores=-1
+):
     """
     This function calcualtes the ES metrics for one of the features in the secondary_features object against
     every variable/feature in the adata object.
@@ -403,70 +405,28 @@ def calc_es_metrics_vec(feature_inds, sample_cardinality, feature_sums, minority
         sample_cardinality,
         feature_sums,
         FF_QF_vs_RF,
+        njobs=None if num_cores == -1 else num_cores,
     )
 
-    @np.errstate(divide="ignore", invalid="ignore")
-    def ess_worker(i, xp_mod=xp):
-        return calc_ESSs(
-            RFms[i],
-            QFms[i],
-            RFMs[i],
-            QFMs[i],
-            max_ent_options[:, i, :],
-            sample_cardinality,
-            overlaps[i],
-            inverse_overlaps[i],
-            case_idxs[i],
-            case_patterns,
-            overlap_lookup,
-            xp_mod=xp_mod,
-        )
-
-    results = []
-
-    if USING_GPU:
-        # NOTE: Use numpy for this part for now until calc_ESS is vectorised for cupy
-        RFms = xp.asnumpy(RFms)
-        QFms = xp.asnumpy(QFms)
-        RFMs = xp.asnumpy(RFMs)
-        QFMs = xp.asnumpy(QFMs)
-        max_ent_options = xp.asnumpy(max_ent_options)
-        overlaps = xp.asnumpy(overlaps)
-        inverse_overlaps = xp.asnumpy(inverse_overlaps)
-        case_idxs = xp.asnumpy(case_idxs)
-        case_patterns = xp.asnumpy(case_patterns)
-        overlap_lookup = xp.asnumpy(overlap_lookup)
-        feature_inds = xp.asnumpy(feature_inds)
-        ess_worker = partial(ess_worker, xp_mod=np)
-
-    # NOTE: Parallelising this didn't make a difference (processes or threads), but cupy overhead did so still need numpy conversion for now
-    for i in tqdm(feature_inds):
-        results.append(ess_worker(i))
-
-    # Extract and process results
-    for ESSs, D_EPs, O_EPs, SWs, SGs in results:
-        # Convert back to cupy
-        if USING_GPU:
-            ESSs = xp.asarray(ESSs)
-            D_EPs = xp.asarray(D_EPs)
-            O_EPs = xp.asarray(O_EPs)
-            SWs = xp.asarray(SWs)
-            SGs = xp.asarray(SGs)
-        identical_features = xp.where(ESSs == 1)[0]
-        D_EPs[identical_features] = 0
-        O_EPs[identical_features] = 0
-        EPs = nanmaximum(D_EPs, O_EPs)
-        all_ESSs.append(ESSs)
-        all_EPs.append(EPs)
-        all_SWs.append(SWs)
-        all_SGs.append(SGs)
-
-    ## Stack the results into a single array
-    ESSs = xp.stack(all_ESSs, axis=0)
-    EPs = xp.stack(all_EPs, axis=0)
-    SWs = xp.stack(all_SWs, axis=0)
-    SGs = xp.stack(all_SGs, axis=0)
-    return ESSs, EPs, SWs, SGs
+    all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_vec(
+        RFms,
+        QFms,
+        RFMs,
+        QFMs,
+        max_ent_options,
+        sample_cardinality,
+        overlaps,
+        inverse_overlaps,
+        case_idxs,
+        case_patterns,
+        overlap_lookup,
+        xp_mod=xp,
+    )
+    iden_feats, iden_cols = xp.nonzero(all_ESSs == 1)
+    all_D_EPs[iden_feats, iden_cols] = 0
+    all_O_EPs[iden_feats, iden_cols] = 0
+    all_EPs = nanmaximum(all_D_EPs, all_O_EPs)
+    return all_ESSs, all_EPs, all_SWs, all_SGs
 
 
 def get_overlap_info(
