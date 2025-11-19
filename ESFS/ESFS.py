@@ -38,7 +38,7 @@ try:
     # Needed because cupy.cuda.is_available() can raise exceptions
     # NOTE: This will be fixed in cupy v14
     # https://github.com/cupy/cupy/pull/9420
-    except Exception as e:
+    except Exception:
         warnings.warn(
             "CuPy is installed but CUDA availability could not be determined. ESFS will run on CPU, which may be slower for large datasets."
         )
@@ -161,6 +161,7 @@ def parallel_calc_es_matrices(
     )
     ## Parallel compute
     with np.errstate(divide="ignore", invalid="ignore"):
+        # Use our GPU-accelerated vectorised function if possible
         if USING_GPU:
             results = calc_es_metrics_vec(
                 feature_inds,
@@ -195,7 +196,7 @@ def parallel_calc_es_matrices(
                 pool.clear()
     ## Unpack results
     results = xp.asarray(results)
-    # NOTE: GPU code gives (4, samples, samples) shape, while CPU gives (samples, 4, samples), so align
+    # NOTE: GPU/vectorised code gives (4, samples, samples) shape, while original CPU gives (samples, 4, samples), so align
     if USING_GPU:
         results = xp.moveaxis(results, 0, 1)
     ## Save outputs requested by the save_matrices paramater
@@ -2213,7 +2214,7 @@ def parallel_replace_clust(
 #### ESFS workflow plotting functions ####
 
 
-def knn_Smooth_Gene_Expression(adata, use_genes, knn=30, metric="correlation", log_scale=False):
+def knn_Smooth_Gene_Expression(adata, use_genes, knn=30, metric="correlation", log_scale: bool = False):
     #
     print(
         "Calculating pairwise cell-cell distance matrix. Distance metric = "
@@ -2221,7 +2222,7 @@ def knn_Smooth_Gene_Expression(adata, use_genes, knn=30, metric="correlation", l
         + ", knn = "
         + str(knn)
     )
-    if xpsparse.issparse(adata.X) == True:
+    if xpsparse.issparse(adata.X):
         distmat = squareform(pdist(adata[:, use_genes].X.A, metric))
         smoothed_expression = adata.X.A.copy()
     else:
@@ -2229,7 +2230,7 @@ def knn_Smooth_Gene_Expression(adata, use_genes, knn=30, metric="correlation", l
         smoothed_expression = adata.X.copy()
     neighbors = xp.sort(xp.argsort(distmat, axis=1)[:, 0:knn])
     #
-    if log_scale == True:
+    if log_scale:
         smoothed_expression = xp.log2(smoothed_expression + 1)
     #
     neighbour_expression = smoothed_expression[neighbors]
