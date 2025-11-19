@@ -619,7 +619,7 @@ def get_overlap_info(
 
 
 def get_overlap_info_vec(
-    fixed_features, fixed_features_cardinality, sample_cardinality, feature_sums, FF_QF_vs_RF
+    fixed_features, fixed_features_cardinality, sample_cardinality, feature_sums, FF_QF_vs_RF, njobs
 ):
     """
     For any pair of features the ES mathematical framework has a set of logical rules regarding how the ES metrics
@@ -650,10 +650,7 @@ def get_overlap_info_vec(
                 feature_sums.shape[0],
             ),
         )
-    else:
-        overlaps = overlaps_cpu(fixed_features.toarray(), global_scaled_matrix)
-
-    if USING_GPU:
+        # Now repeat for inverse overlaps
         inverse_overlaps = xp.zeros(
             (fixed_features.shape[1], feature_sums.shape[0]), dtype=xp.float32
         )
@@ -675,7 +672,18 @@ def get_overlap_info_vec(
             ),
         )
     else:
-        inverse_overlaps = overlaps_cpu(1 - fixed_features.toarray(), global_scaled_matrix)
+        overlaps = []
+        inverse_overlaps = []
+        worker_func = partial(overlaps_cpu_parallel, fixed_features=fixed_features.toarray())
+        with ProcessPool(nodes=njobs) as pool:
+            for overlap, inv_overlap in tqdm(
+                pool.imap(worker_func, range(fixed_features.shape[1])),
+                total=fixed_features.shape[1],
+                desc="Calculating overlaps",
+            ):
+                overlaps.append(overlap)
+                inverse_overlaps.append(inv_overlap)
+            pool.clear()
 
     # Calculate our ineqs and reshape for broadcasting
     ff_is_min = (fixed_features_cardinality < (sample_cardinality / 2))[:, None]
