@@ -921,6 +921,11 @@ def get_overlap_bounds_vec(use_curve, RFms, RFMs, QFms, QFMs, xp_mod):
 
 
 def common_ES_metrics_batched(
+    all_ESSs,
+    all_SWs,
+    all_SGs,
+    all_D_EPs,
+    all_O_EPs,
     ind_E,
     min_E,
     CE,
@@ -938,30 +943,24 @@ def common_ES_metrics_batched(
     xp_mod,
 ):
     """Vectorized version that handles all features at once with masking."""
-    # Initialize NaN arrays
-    SWs = xp_mod.full_like(ind_E, xp_mod.nan)
-    SGs = xp_mod.full_like(ind_E, xp_mod.nan)
-    ESS = xp_mod.full_like(ind_E, xp_mod.nan)
-    D_EPs = xp_mod.full_like(ind_E, xp_mod.nan)
-    O_EPs = xp_mod.full_like(ind_E, xp_mod.nan)
     # Avoid division by zero by using where
-    SWs = xp_mod.where(curve_mask & (ind_E != 0), (ind_E - min_E) / ind_E, SWs)
-    SGs = xp_mod.where(curve_mask & ((ind_E - min_E) != 0), (ind_E - CE) / (ind_E - min_E), SGs)
+    all_SWs[use_curve] = xp_mod.where(curve_mask & (ind_E != 0), (ind_E - min_E) / ind_E, all_SWs[use_curve])
+    all_SGs[use_curve] = xp_mod.where(curve_mask & ((ind_E - min_E) != 0), (ind_E - CE) / (ind_E - min_E), all_SGs[use_curve])
     # Correct boundary float errors where not NaN
-    SGs = xp_mod.where(xp_mod.isnan(SGs), xp_mod.nan, xp_mod.clip(SGs, 0, 1))
+    all_SGs[use_curve] = xp_mod.where(xp_mod.isnan(all_SGs[use_curve]), xp_mod.nan, xp_mod.clip(all_SGs[use_curve], 0, 1))
 
-    ESS = xp_mod.where(curve_mask, SWs * SGs * SDs * case_patterns[curve_case_idxs, use_curve], ESS)
+    all_ESSs[use_curve] = xp_mod.where(curve_mask, all_SWs[use_curve] * all_SGs[use_curve] * SDs * case_patterns[curve_case_idxs, use_curve], all_ESSs[use_curve])
     # Calculate entropy per unit, avoiding division by zero
     SD_1_IndEnt = xp_mod.where(SD_1_mask & (ind_X_1 != 0), ind_E / ind_X_1, 0)
     SD1_IndEnt = xp_mod.where(SD1_mask & (ind_X1 != 0), ind_E / ind_X1, 0)
 
     # Calculate D_EPs
-    D_EPs = xp_mod.where(SD_1_mask & (D != 0), ((CE - min_E) / D) - SD_1_IndEnt, D_EPs)
-    D_EPs = xp_mod.where(SD1_mask & (D != 0), ((CE - min_E) / D) - SD1_IndEnt, D_EPs)
+    all_D_EPs[use_curve] = xp_mod.where(SD_1_mask & (D != 0), ((CE - min_E) / D) - SD_1_IndEnt, all_D_EPs[use_curve])
+    all_D_EPs[use_curve] = xp_mod.where(SD1_mask & (D != 0), ((CE - min_E) / D) - SD1_IndEnt, all_D_EPs[use_curve])
     # Calculate O_EPs
-    O_EPs = xp_mod.where(SD_1_mask & (O != 0), (CE / O) - SD_1_IndEnt, O_EPs)
-    O_EPs = xp_mod.where(SD1_mask & (O != 0), (CE / O) - SD1_IndEnt, O_EPs)
-    return ESS, SWs, SGs, D_EPs, O_EPs
+    all_O_EPs[use_curve] = xp_mod.where(SD_1_mask & (O != 0), (CE / O) - SD_1_IndEnt, all_O_EPs[use_curve])
+    all_O_EPs[use_curve] = xp_mod.where(SD1_mask & (O != 0), (CE / O) - SD1_IndEnt, all_O_EPs[use_curve])
+    return all_ESSs, all_SWs, all_SGs, all_D_EPs, all_O_EPs
 
 def calc_ESSs_old(
     RFms,
