@@ -102,6 +102,7 @@ def parallel_calc_es_matrices(
     secondary_features_label="Self",
     save_matrices: tuple = ("ESSs", "EPs"),
     use_cores=-1,
+    chunksize: Optional[int] = None,
 ):
     """
     Using the Entropy Sorting (ES) mathematical framework, we may caclulate the ESS, EP, SW and SG correlation metrics
@@ -168,6 +169,7 @@ def parallel_calc_es_matrices(
                 sample_cardinality=sample_cardinality,
                 feature_sums=feature_sums,
                 minority_states=minority_states,
+                chunksize=chunksize,
             )
         elif use_cores == 1:
             # Single core: run sequentially for easier debugging (only)
@@ -360,7 +362,7 @@ def calc_es_metrics(feature_ind, sample_cardinality):
 
 
 def calc_es_metrics_vec(
-    feature_inds, sample_cardinality, feature_sums, minority_states, num_cores=-1
+    feature_inds, sample_cardinality, feature_sums, minority_states, num_cores=-1, chunksize: Optional[int] = None
 ):
     """
     This function calcualtes the ES metrics for one of the features in the secondary_features object against
@@ -409,7 +411,8 @@ def calc_es_metrics_vec(
         njobs=None if num_cores == -1 else num_cores,
     )
 
-    all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_vec(
+
+    all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_chunked(
         RFms,
         QFms,
         RFMs,
@@ -422,6 +425,7 @@ def calc_es_metrics_vec(
         case_patterns,
         overlap_lookup,
         xp_mod=xp,
+        chunksize=chunksize,
     )
     iden_feats, iden_cols = xp.nonzero(all_ESSs == 1)
     all_D_EPs[iden_feats, iden_cols] = 0
@@ -762,7 +766,8 @@ def overlaps_cpu_parallel(i, fixed_features):
     inv_overlap = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
     return overlap.astype(xp.float64), inv_overlap.astype(xp.float64)
 
-def calc_ESSs_vec(
+
+def calc_ESSs_chunked(
     RFms,
     QFms,
     RFMs,
@@ -775,14 +780,84 @@ def calc_ESSs_vec(
     case_patterns,
     overlap_lookup,
     xp_mod: Optional[ModuleType] = None,
+    chunksize: Optional[int] = None,
 ):
     if xp_mod is None:
         xp_mod = xp
+    # If no chunksize is provided, process all at once
+    if chunksize is None:
+        all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_vec(
+            RFms,
+            QFms,
+            RFMs,
+            QFMs,
+            max_ent_options,
+            sample_cardinality,
+            overlaps,
+            inverse_overlaps,
+            case_idxs,
+            case_patterns,
+            overlap_lookup,
+            xp_mod=xp,
+        )
+        return all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs
+    # Otherwise, process in chunks
+    n_feats = RFms.shape[0]
+    n_comps = RFms.shape[1]
+    final_ESSs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
+    final_D_EPs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
+    final_O_EPs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
+    final_SWs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
+    final_SGs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
 
+    for start_idx in tqdm(range(0, n_feats, chunksize), desc="ESS Chunks"):
+        end_idx = min(start_idx + chunksize, n_feats)
+        (
+            chunk_ESSs,
+            chunk_D_EPs,
+            chunk_O_EPs,
+            chunk_SWs,
+            chunk_SGs,
+        ) = calc_ESSs_vec(
+            RFms[start_idx:end_idx],
+            QFms[start_idx:end_idx],
+            RFMs[start_idx:end_idx],
+            QFMs[start_idx:end_idx],
+            max_ent_options[:, start_idx:end_idx],
+            sample_cardinality,
+            overlaps[start_idx:end_idx],
+            inverse_overlaps[start_idx:end_idx],
+            case_idxs[start_idx:end_idx],
+            case_patterns,
+            overlap_lookup,
+            xp_mod=xp_mod,
+        )
+        final_ESSs[start_idx:end_idx] = chunk_ESSs
+        final_D_EPs[start_idx:end_idx] = chunk_D_EPs
+        final_O_EPs[start_idx:end_idx] = chunk_O_EPs
+        final_SWs[start_idx:end_idx] = chunk_SWs
+        final_SGs[start_idx:end_idx] = chunk_SGs
+    return final_ESSs, final_D_EPs, final_O_EPs, final_SWs, final_SGs
+
+def calc_ESSs_vec(
+    RFms,
+    QFms,
+    RFMs,
+    QFMs,
+    max_ent_options,
+    sample_cardinality,
+    overlaps,
+    inverse_overlaps,
+    case_idxs,
+    case_patterns,
+    overlap_lookup,
+    xp_mod
+):
     n_feats = RFms.shape[0]
     n_comps = RFms.shape[1]
     # Create output arrays, with NaNs for easier later masking/maximum selection
     # NOTE: Using float32 to save memory, should be sufficient precision
+    # NOTE: If needed, we can cut the first dim and iteratively store the max
     all_ESSs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
     all_D_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
     all_O_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
