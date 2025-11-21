@@ -160,7 +160,7 @@ def parallel_calc_es_matrices(
     ## Establish which secondary_features will be compared against each of the features in adata
     global secondary_features
     if secondary_features_label == "Self":
-        secondary_features = adata.layers["Scaled_Counts"].copy()
+        secondary_features = adata.layers["Scaled_Counts"]
     else:
         print(
             "You have provided a 'secondary_features_label', implying that in the anndata object there is a corresponding csc_sparse martix object with rows as samples and columns as features. Each feature will be used to calculate ES scores for each of the variables of the adata object"
@@ -414,7 +414,10 @@ def calc_es_metrics_vec(
     """
     ## Extract the Fixed Feature (FF)
     fixed_features = secondary_features[:, feature_inds]
-    fixed_features_cardinality = fixed_features.toarray().sum(axis=0)
+    if xpsparse.issparse(fixed_features):
+        fixed_features_cardinality = fixed_features.sum(axis=0).flatten()
+    else:
+        fixed_features_cardinality = fixed_features.toarray().sum(axis=0)
     fixed_feature_minority_states = fixed_features_cardinality.copy()
     idxs = fixed_feature_minority_states >= (sample_cardinality / 2)
     if idxs.any():
