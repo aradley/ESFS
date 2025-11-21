@@ -76,24 +76,63 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
         adata = adata[:, keep_genes]
     # Un-sparsify the data for clipping and scaling
     scaled_expressions = adata.X.copy()
-    # NOTE: Use scipy, not critical
+    # Check if sparse, and convert to CSC
+    # Expectation is that if it is sparse at this stage, it'll be scipy sparse
+    scaled_expressions = adata.X.copy()
     if spsparse.issparse(scaled_expressions):
-        scaled_expressions = xp.asarray(scaled_expressions.todense())
-    # Log scale the data if user requests.
+        if USING_GPU:
+            if spsparse.isspmatrix_csr(scaled_expressions):
+                scaled_expressions = xpsparse.csr_matrix(scaled_expressions)
+            elif spsparse.isspmatrix_csc(scaled_expressions):
+                scaled_expressions = xpsparse.csc_matrix(scaled_expressions)
+            elif spsparse.isspmatrix_coo(scaled_expressions):
+                scaled_expressions = xpsparse.coo_matrix(scaled_expressions)
+            elif spsparse.isspmatrix_dia(scaled_expressions):
+                scaled_expressions = xpsparse.dia_matrix(scaled_expressions)
+        # No matter what, convert to CSC for processing
+        scaled_expressions = scaled_expressions.tocsc()
+    else:
+        scaled_expressions = xpsparse.csc_matrix(scaled_expressions)
     if log_scale:
-        scaled_expressions = xp.log2(scaled_expressions + 1)
-    # Clip exceptionally high gene expression for each gene. Default percentile is the 97.5th.
-    upper = xp.percentile(scaled_expressions, clip_percentile, axis=0)
-    mask = xp.nonzero(upper == 0)[0]
-    upper[mask] = xp.max(scaled_expressions, axis=0)[mask]
-    scaled_expressions = scaled_expressions.clip(max=upper[None, :])
-    # Normalise gene expression between 0 and 1.
-    scaled_expressions = scaled_expressions / upper
-    # Return data as a sparse csc_matrix
-    adata.layers["Scaled_Counts"] = xpsparse.csc_matrix(scaled_expressions.astype("f"))
-    print(
-        "Scaled expression matrix has been saved to 'adata.layers['Scaled_Counts']' as a sparse csc_matrix"
-    )
+        scaled_expressions.data = xp.log2(scaled_expressions.data + 1)
+    # Iterate through each gene
+    n_rows, n_cols = scaled_expressions.shape
+    upper = xp.zeros(n_cols, dtype=xp.float64)
+    for col_idx in range(n_cols):
+        start_idx = scaled_expressions.indptr[col_idx]
+        end_idx = scaled_expressions.indptr[col_idx + 1]
+        col_data = scaled_expressions.data[start_idx:end_idx]
+        # Ensure 0s included in percentile calculation
+        n_nonzero = len(col_data)
+        n_zeros = n_rows - n_nonzero
+        if n_nonzero > 0:
+            # Quick check if percentile would be zero
+            target_rank = (clip_percentile / 100) * n_rows
+            if target_rank <= n_zeros:
+                # It would be 0, so we take the max and continue
+                upper[col_idx] = xp.max(col_data)
+                continue
+            # Lazily pad with zeros to replicate full column
+            # NOTE: If memory becomes an issue, can adjust percentile based on sparsity
+            col_data = xp.concatenate((xp.zeros(n_zeros, dtype=col_data.dtype), col_data))
+            upper[col_idx] = xp.percentile(col_data, clip_percentile)
+            if upper[col_idx] == 0:
+                upper[col_idx] = xp.max(col_data)
+        # Fallback to avoid division by zero
+        else:
+            upper[col_idx] = 1.0
+    # Build a mapping from data index to column index
+    col_indices = xp.zeros(len(scaled_expressions.data), dtype=xp.int32)
+    for col_idxs in range(n_cols):
+        start_idx = scaled_expressions.indptr[col_idxs]
+        end_idx = scaled_expressions.indptr[col_idxs + 1]
+        col_indices[start_idx:end_idx] = col_idxs
+    upper_broadcast = upper[col_indices]
+    # Clip and scale
+    scaled_expressions.data = xp.minimum(scaled_expressions.data, upper_broadcast)
+    scaled_expressions.data = scaled_expressions.data / upper_broadcast
+    # Downcast to float32 when storing
+    adata.layers["Scaled_Counts"] = scaled_expressions.astype(xp.float32)
     return adata
 
 
