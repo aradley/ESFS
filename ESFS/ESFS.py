@@ -9,6 +9,7 @@ import warnings
 import anndata as ad
 import matplotlib.pyplot as plt
 import multiprocess
+from numba import njit, prange
 import numpy as np
 import pandas as pd
 from pathos.pools import ProcessPool
@@ -680,18 +681,22 @@ def get_overlap_info_vec(
             ),
         )
     else:
-        overlaps = []
-        inverse_overlaps = []
-        worker_func = partial(overlaps_cpu_parallel, fixed_features=fixed_features.toarray())
-        with ProcessPool(nodes=njobs) as pool:
-            for overlap, inv_overlap in tqdm(
-                pool.imap(worker_func, range(fixed_features.shape[1])),
-                total=fixed_features.shape[1],
-                desc="Calculating overlaps",
-            ):
-                overlaps.append(overlap)
-                inverse_overlaps.append(inv_overlap)
-            pool.clear()
+        overlaps = overlaps_cpu_parallel(
+            fixed_features.toarray(),
+            global_scaled_matrix.data,
+            global_scaled_matrix.indices,
+            global_scaled_matrix.indptr,
+            fixed_features.shape[1],
+            global_scaled_matrix.shape[1],
+        )
+        inverse_overlaps = overlaps_cpu_parallel(
+            1 - fixed_features.toarray(),
+            global_scaled_matrix.data,
+            global_scaled_matrix.indices,
+            global_scaled_matrix.indptr,
+            fixed_features.shape[1],
+            global_scaled_matrix.shape[1],
+        )
 
     # Calculate our ineqs and reshape for broadcasting
     ff_is_min = (fixed_features_cardinality < (sample_cardinality / 2))[:, None]
@@ -778,36 +783,26 @@ def overlaps_cuda():
     module = xp.RawModule(code=kernel_code)
     return module.get_function("compute_overlaps")
 
-
-def overlaps_cpu_parallel(i, fixed_features):
+@njit(parallel=True)
+def overlaps_cpu_parallel(fixed_features, data, indices, indptr, n_fixed_features, n_features):
     """
-    Non-vectorised CPU version of overlaps calculation for when GPU is not available using original code.
+    Compute overlaps between fixed features and sparse matrix data.
     """
-    fixed_feature = fixed_features[:, i]
-    nonzero_inds = xp.where(fixed_feature != 0)[0]
-    sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    # NOTE: Could remove .T[0] if remove [:, None] from fixed_feature, need to check downstream
-    B = xpsparse.csc_matrix(
-        (
-            fixed_feature[nonzero_inds].T[sub_global_scaled_matrix.indices],
-            sub_global_scaled_matrix.indices,
-            sub_global_scaled_matrix.indptr,
-        )
-    )
-    overlap = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
-    fixed_feature = 1 - fixed_feature
-    nonzero_inds = xp.where(fixed_feature != 0)[0]
-    sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    B = xpsparse.csc_matrix(
-        (
-            fixed_feature[nonzero_inds].T[sub_global_scaled_matrix.indices],
-            sub_global_scaled_matrix.indices,
-            sub_global_scaled_matrix.indptr,
-        )
-    )
-    inv_overlap = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
-    return overlap.astype(xp.float64), inv_overlap.astype(xp.float64)
-
+    overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float64)
+    # Parallelize over the outer loop (fixed features)
+    for i in prange(n_fixed_features):
+        for j in range(n_features):
+            sum_val = 0.0
+            start = indptr[j]
+            end = indptr[j + 1]
+            for k in range(start, end):
+                row = indices[k]
+                ff_val = fixed_features[row, i]
+                if ff_val != 0.0:
+                    gs_val = data[k]
+                    sum_val += min(ff_val, gs_val)
+            overlaps[i, j] = sum_val
+    return overlaps
 
 def calc_ESSs_chunked(
     RFms,
