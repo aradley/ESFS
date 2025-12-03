@@ -788,7 +788,10 @@ def overlaps_cpu_parallel(fixed_features, data, indices, indptr, n_fixed_feature
     """
     Compute overlaps between fixed features and sparse matrix data.
     """
-    overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float64)
+    # NOTE: To exactly recreate original code, this needs to be calculated into 32-bits
+    # In the original code, this was then upcast to 64 later, but still resulted in 0s where expected
+    # Calculating this in 64 bits directly will not lead to the same 0s in very very few edge cases
+    overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
     # Parallelize over the outer loop (fixed features)
     for i in prange(n_fixed_features):
         for j in range(n_features):
