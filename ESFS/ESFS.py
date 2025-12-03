@@ -2,6 +2,7 @@
 
 ### Dependencies ###
 from functools import partial
+import os
 from types import ModuleType
 from typing import Optional
 import warnings
@@ -159,6 +160,9 @@ def parallel_calc_es_matrices(
     feature_inds = xp.arange(secondary_features.shape[1])
     ## Identify number of cores to use.
     cores_avail = multiprocess.cpu_count()
+    # Special check if we're running in a SLURM environment, where CPU count does not match CPUs allocated
+    if "SLURM_CPUS_ON_NODE" in os.environ:
+        cores_avail = min(cores_avail, int(os.environ["SLURM_CPUS_ON_NODE"]))
     print("Cores Available: " + str(cores_avail))
     if use_cores == -1:
         use_cores = cores_avail - 1  # -1 Is an arbitrary buffer of idle cores that I set.
