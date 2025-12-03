@@ -125,6 +125,8 @@ def parallel_calc_es_matrices(
     `save_matrices` disctates which ES metrics will be written to the outputted adata object. The options are "ESSs", "EPs", "SGs", "SWs".
 
     `use_cores` defines how many CPU cores to use. Is use_cores = -1, the software will use N-1 the number of cores available on the machine.
+
+    `chunksize` is either used to chunk ESS calculation when using GPU acceleration, or passed to pathos when using CPU parallelisation.
     """
     ## Establish which secondary_features will be compared against each of the features in adata
     global secondary_features
@@ -199,6 +201,7 @@ def parallel_calc_es_matrices(
                     pool.imap(
                         partial(calc_es_metrics, sample_cardinality=sample_cardinality),
                         feature_inds,
+                        chunksize=chunksize if chunksize is not None else 1, # Default chunksize to 1 if not provided
                     ),
                     total=len(feature_inds),
                 ):
