@@ -20,39 +20,10 @@ from sklearn.cluster import KMeans, HDBSCAN
 from tqdm import tqdm
 import umap
 
-# If installed and in right env, use CuPy for GPU acceleration
-try:
-    import cupy as xp
-    import cupyx.scipy.sparse as xpsparse
-
-    # Secondarily check if CUDA is available, in case it's run on e.g. different HPC partitions
-    try:
-        if xp.cuda.is_available():
-            USING_GPU = True
-        else:
-            warnings.warn(
-                "CuPy is installed but CUDA is not available. ESFS will run on CPU, which may be slower for large datasets."
-            )
-            xp = np
-            xpsparse = spsparse
-            USING_GPU = False
-    # Needed because cupy.cuda.is_available() can raise exceptions
-    # NOTE: This will be fixed in cupy v14
-    # https://github.com/cupy/cupy/pull/9420
-    except Exception:
-        warnings.warn(
-            "CuPy is installed but CUDA availability could not be determined. ESFS will run on CPU, which may be slower for large datasets."
-        )
-        xp = np
-        xpsparse = spsparse
-        USING_GPU = False
-except ImportError:
-    warnings.warn(
-        "CuPy is not installed. ESFS will run on CPU, which may be slower for large datasets."
-    )
-    xp = np
-    xpsparse = spsparse
-    USING_GPU = False
+from . import backend
+xp = backend.xp
+xpsparse = backend.xpsparse
+USING_GPU = backend.USING_GPU
 
 ###### Entropy Sorting (ES) metric calculations ######
 
@@ -926,7 +897,6 @@ def calc_ESSs_vec(
         D = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
         O = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
         if use_curve == 0:
-            # TODO: Check that this one-liner can be done, both generally and vectorised
             D = xp_mod.where(SD_1_mask, curve_overlaps, RFms - curve_overlaps)
             O = xp_mod.where(
                 SD_1_mask,
