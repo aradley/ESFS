@@ -892,10 +892,10 @@ def calc_ESSs_vec(
         ind_X1 = max_overlap - max_ent_x
         # NOTE: Again, force float32 to save memory
         D = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
-        O = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
+        O = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)  # noqa: E741
         if use_curve == 0:
             D = xp_mod.where(SD_1_mask, curve_overlaps, RFms - curve_overlaps)
-            O = xp_mod.where(
+            O = xp_mod.where(  # noqa: E741
                 SD_1_mask,
                 sample_cardinality - (RFms + QFms) + curve_overlaps,
                 QFms - curve_overlaps,
@@ -914,13 +914,13 @@ def calc_ESSs_vec(
             )
         elif use_curve == 1:
             D = xp_mod.where(SD_1_mask, curve_overlaps, RFms - curve_overlaps)
-            O = xp_mod.where(SD_1_mask, QFms - RFms + curve_overlaps, QFMs - RFms + D)
+            O = xp_mod.where(SD_1_mask, QFms - RFms + curve_overlaps, QFMs - RFms + D)  # noqa: E741
             CE, ind_E, min_E = ESE2_batched(
                 curve_overlaps, SDs, RFms, RFMs, QFms, QFMs, sample_cardinality, curve_mask, xp_mod
             )
         elif use_curve == 2:
             D = xp_mod.where(SD_1_mask, QFMs - RFMs + curve_overlaps, QFms - curve_overlaps)
-            O = xp_mod.where(SD_1_mask, curve_overlaps, RFMs - curve_overlaps)
+            O = xp_mod.where(SD_1_mask, curve_overlaps, RFMs - curve_overlaps)  # noqa: E741
             CE, ind_E, min_E = ESE3_batched(
                 curve_overlaps,
                 SDs,
@@ -939,7 +939,7 @@ def calc_ESSs_vec(
                 curve_overlaps - (sample_cardinality - (QFms + RFms)),
                 QFMs - curve_overlaps,
             )
-            O = xp_mod.where(SD_1_mask, curve_overlaps, RFMs - QFMs + D)
+            O = xp_mod.where(SD_1_mask, curve_overlaps, RFMs - QFMs + D)  # noqa: E741
             CE, ind_E, min_E = ESE4_batched(
                 curve_overlaps,
                 SDs,
@@ -1013,7 +1013,7 @@ def common_ES_metrics_batched(
     CE,
     SDs,
     D,
-    O,
+    O,  # noqa: E741
     ind_X_1,
     ind_X1,
     case_patterns,
@@ -1086,7 +1086,7 @@ def calc_ESSs_old(
         SDs[SD1_idxs] = 1
         #
         D = xp.zeros(calc_idxs.shape[0])
-        O = xp.zeros(calc_idxs.shape[0])
+        O = xp.zeros(calc_idxs.shape[0])  # noqa: E741
         D[SD_1_idxs] = overlaps[SD_1_idxs]
         O[SD_1_idxs] = (
             sample_cardinality
@@ -1154,7 +1154,7 @@ def calc_ESSs_old(
         SDs[SD1_idxs] = 1
         #
         D = xp.zeros(calc_idxs.shape[0])
-        O = xp.zeros(calc_idxs.shape[0])
+        O = xp.zeros(calc_idxs.shape[0])  # noqa: E741
         D[SD_1_idxs] = overlaps[SD_1_idxs]
         O[SD_1_idxs] = QFms[calc_idxs][SD_1_idxs] - RFms[calc_idxs][SD_1_idxs] + overlaps[SD_1_idxs]
         D[SD1_idxs] = RFms[calc_idxs][SD1_idxs] - overlaps[SD1_idxs]
@@ -1217,7 +1217,7 @@ def calc_ESSs_old(
         SDs[SD1_idxs] = 1
         #
         D = xp.zeros(calc_idxs.shape[0])
-        O = xp.zeros(calc_idxs.shape[0])
+        O = xp.zeros(calc_idxs.shape[0])  # noqa: E741
         D[SD_1_idxs] = QFMs[calc_idxs][SD_1_idxs] - RFMs[calc_idxs][SD_1_idxs] + overlaps[SD_1_idxs]
         O[SD_1_idxs] = overlaps[SD_1_idxs]
         D[SD1_idxs] = QFms[calc_idxs][SD1_idxs] - overlaps[SD1_idxs]
@@ -1281,7 +1281,7 @@ def calc_ESSs_old(
         SDs[SD1_idxs] = 1
         #
         D = xp.zeros(calc_idxs.shape[0])
-        O = xp.zeros(calc_idxs.shape[0])
+        O = xp.zeros(calc_idxs.shape[0])  # noqa: E741
         D[SD_1_idxs] = overlaps[SD_1_idxs] - (
             sample_cardinality - (QFms[calc_idxs][SD_1_idxs] + RFms[calc_idxs][SD_1_idxs])
         )
