@@ -45,7 +45,7 @@ def knn_Smooth_Gene_Expression(
         + " has been saved to 'adata.layers['Smoothed_Expression']'"
     )
     adata.layers["Smoothed_Expression"] = xpsparse.csc_matrix(
-        smoothed_expression.astype("f")
+        smoothed_expression.astype(xp.float32)
     )
     return adata
 
@@ -329,7 +329,7 @@ def plot_gene_cluster_cell_UMAPs(
     # TODO: Refactor this to move away from strings as we have done prev with `get_gene_cluster_cell_UMAPs`
     if cell_label in adata.obs.columns:
         cell_labels = adata.obs[cell_label]
-        unique_cell_labels = xp.unique(cell_labels)
+        unique_cell_labels = np.unique(cell_labels)
         #
         for i, embedding in enumerate(gene_cluster_embeddings):
             plt.figure(figsize=(7, 5))
@@ -340,8 +340,8 @@ def plot_gene_cluster_cell_UMAPs(
                 + " genes",
                 fontsize=20,
             )
-            for j in xp.arange(unique_cell_labels.shape[0]):
-                IDs = xp.where(cell_labels == unique_cell_labels[j])
+            for j in np.arange(unique_cell_labels.shape[0]):
+                IDs = np.where(cell_labels == unique_cell_labels[j])
                 plt.scatter(
                     embedding[IDs, 0],
                     embedding[IDs, 1],
@@ -366,18 +366,18 @@ def plot_gene_cluster_cell_UMAPs(
                     markerscale=5,
                 )
     #
-    if xp.isin(cell_label, adata.var.index):
+    if np.isin(cell_label, adata.var.index):
         #
         expression = adata[:, cell_label].X.T
         if xpsparse.issparse(expression):
             expression = expression.todense()
         #
-        expression = xp.asarray(expression)[0]
+        expression = np.asarray(expression)[0]
         #
         if log2_gene_expression:
-            expression = xp.log2(expression + 1)
+            expression = np.log2(expression + 1)
         #
-        for i in xp.arange(len(gene_cluster_embeddings)):
+        for i in np.arange(len(gene_cluster_embeddings)):
             embedding = gene_cluster_embeddings[i]
             plt.figure(figsize=(7, 5))
             plt.title("Cell UMAP" + "\n" + cell_label, fontsize=20)
@@ -391,8 +391,8 @@ def plot_gene_cluster_cell_UMAPs(
             cb = plt.colorbar()
             cb.set_label("$log_2$(Expression)", labelpad=-50, fontsize=10)
     #
-    if not (xp.isin(cell_label, adata.obs.columns)) & (
-        xp.isin(cell_label, adata.var.index)
+    if not (np.isin(cell_label, adata.obs.columns)) & (
+        np.isin(cell_label, adata.var.index)
     ):
         print(
             "Cell label or gene not found in 'adata.obs.columns' or 'adata.var.index'"
