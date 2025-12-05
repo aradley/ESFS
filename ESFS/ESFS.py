@@ -617,8 +617,11 @@ def get_overlap_info_vec(
     """
     ## Pairwise calculate total overlaps of FF values with the values every other a feature in adata
     if USING_GPU:
+        # Convert to CSC format for column-wise access (if not already)
+        fixed_features_csc = fixed_features.tocsc()
+        global_scaled_matrix_csc = global_scaled_matrix.tocsc()
         overlaps = xp.zeros((fixed_features.shape[1], feature_sums.shape[0]), dtype=xp.float32)
-        kernel = overlaps_cuda()
+        kernel = overlaps_sparse_cuda()
         block = (16, 16)
         grid = (
             (fixed_features.shape[1] + block[0] - 1) // block[0],
@@ -628,31 +631,34 @@ def get_overlap_info_vec(
             grid,
             block,
             (
-                xp.asfortranarray(fixed_features.todense()).astype(xp.float32).ravel(order="F"),
-                global_scaled_matrix.data.astype(xp.float32),
-                global_scaled_matrix.indices,
-                global_scaled_matrix.indptr,
+                fixed_features_csc.data.astype(xp.float32),
+                fixed_features_csc.indices,
+                fixed_features_csc.indptr,
+                global_scaled_matrix_csc.data.astype(xp.float32),
+                global_scaled_matrix_csc.indices,
+                global_scaled_matrix_csc.indptr,
                 overlaps.ravel(),
-                fixed_features.shape[0],
                 fixed_features.shape[1],
                 feature_sums.shape[0],
             ),
         )
-        # Now repeat for inverse overlaps
+
+        # Now compute inverse overlaps using sparse-aware kernel
         inverse_overlaps = xp.zeros(
             (fixed_features.shape[1], feature_sums.shape[0]), dtype=xp.float32
         )
-        kernel = overlaps_cuda()
-        kernel(
+        kernel_inv = inverse_overlaps_sparse_cuda()
+        kernel_inv(
             grid,
             block,
             (
-                xp.asfortranarray((1 - fixed_features.todense()).astype(xp.float32)).ravel(
-                    order="F"
-                ),
-                global_scaled_matrix.data.astype(xp.float32),
-                global_scaled_matrix.indices,
-                global_scaled_matrix.indptr,
+                fixed_features_csc.data.astype(xp.float32),
+                fixed_features_csc.indices,
+                fixed_features_csc.indptr,
+                global_scaled_matrix_csc.data.astype(xp.float32),
+                global_scaled_matrix_csc.indices,
+                global_scaled_matrix_csc.indptr,
+                feature_sums.astype(xp.float32),
                 inverse_overlaps.ravel(),
                 fixed_features.shape[0],
                 fixed_features.shape[1],
@@ -726,32 +732,54 @@ def get_overlap_info_vec(
     return overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup
 
 
-def overlaps_cuda():
+def overlaps_sparse_cuda():
+    """
+    CUDA kernel for computing overlaps using sparse CSC format for fixed_features.
+    This avoids the memory explosion from densifying sparse matrices.
+    """
     kernel_code = r"""
     extern "C" __global__
-    void compute_overlaps(const float* fixed_features,
-                        const float* data,
-                        const int* indices,
-                        const int* indptr,
-                        float* overlaps,
-                        int n_samples,
-                        int n_fixed_features,
-                        int n_features) {
+    void compute_overlaps_sparse(const float* ff_data,
+                                const int* ff_indices,
+                                const int* ff_indptr,
+                                const float* gs_data,
+                                const int* gs_indices,
+                                const int* gs_indptr,
+                                float* overlaps,
+                                int n_fixed_features,
+                                int n_features) {
         int i = blockIdx.x * blockDim.x + threadIdx.x;  // fixed_feature index
         int j = blockIdx.y * blockDim.y + threadIdx.y;  // feature index
 
         if (i >= n_fixed_features || j >= n_features) return;
 
         float sum = 0.0f;
-        int start = indptr[j];
-        int end = indptr[j + 1];
 
-        for (int k = start; k < end; ++k) {
-            int row = indices[k]; 
-            float ff_val = fixed_features[row + i * n_samples];
-            if (ff_val != 0.0f) {
-                float gs_val = data[k];
+        // Get sparse column ranges for both matrices
+        int ff_start = ff_indptr[i];
+        int ff_end = ff_indptr[i + 1];
+        int gs_start = gs_indptr[j];
+        int gs_end = gs_indptr[j + 1];
+
+        // Two-pointer merge algorithm to find overlapping rows
+        int ff_ptr = ff_start;
+        int gs_ptr = gs_start;
+
+        while (ff_ptr < ff_end && gs_ptr < gs_end) {
+            int ff_row = ff_indices[ff_ptr];
+            int gs_row = gs_indices[gs_ptr];
+
+            if (ff_row == gs_row) {
+                // Both matrices have values at this row
+                float ff_val = ff_data[ff_ptr];
+                float gs_val = gs_data[gs_ptr];
                 sum += fminf(ff_val, gs_val);
+                ff_ptr++;
+                gs_ptr++;
+            } else if (ff_row < gs_row) {
+                ff_ptr++;
+            } else {
+                gs_ptr++;
             }
         }
 
@@ -760,7 +788,76 @@ def overlaps_cuda():
     """
 
     module = xp.RawModule(code=kernel_code)
-    return module.get_function("compute_overlaps")
+    return module.get_function("compute_overlaps_sparse")
+
+
+def inverse_overlaps_sparse_cuda():
+    """
+    CUDA kernel for computing inverse overlaps: min(1-ff, gs).
+    Uses sparse representation to avoid densification.
+    Key insight: min(1-ff, gs) = gs - min(ff, gs) when ff > 0, or gs when ff = 0
+    So we compute: sum_all_gs_nonzeros(gs) - sum_overlaps(ff, gs) + corrections
+    """
+    kernel_code = r"""
+    extern "C" __global__
+    void compute_inverse_overlaps_sparse(const float* ff_data,
+                                        const int* ff_indices,
+                                        const int* ff_indptr,
+                                        const float* gs_data,
+                                        const int* gs_indices,
+                                        const int* gs_indptr,
+                                        const float* gs_sums,
+                                        float* inverse_overlaps,
+                                        int n_samples,
+                                        int n_fixed_features,
+                                        int n_features) {
+        int i = blockIdx.x * blockDim.x + threadIdx.x;  // fixed_feature index
+        int j = blockIdx.y * blockDim.y + threadIdx.y;  // feature index
+
+        if (i >= n_fixed_features || j >= n_features) return;
+
+        // Strategy: min(1-ff, gs) at each position
+        // For positions where gs=0: contributes 0
+        // For positions where gs>0, ff=0: contributes gs  (1-0=1, min(1,gs)=gs)
+        // For positions where gs>0, ff>0: contributes min(1-ff, gs)
+
+        float sum = 0.0f;
+
+        int ff_start = ff_indptr[i];
+        int ff_end = ff_indptr[i + 1];
+        int gs_start = gs_indptr[j];
+        int gs_end = gs_indptr[j + 1];
+
+        int ff_ptr = ff_start;
+        int gs_ptr = gs_start;
+
+        // Iterate through gs nonzeros
+        while (gs_ptr < gs_end) {
+            int gs_row = gs_indices[gs_ptr];
+            float gs_val = gs_data[gs_ptr];
+
+            // Find if ff has a value at this row
+            float ff_val = 0.0f;
+            while (ff_ptr < ff_end && ff_indices[ff_ptr] < gs_row) {
+                ff_ptr++;
+            }
+
+            if (ff_ptr < ff_end && ff_indices[ff_ptr] == gs_row) {
+                ff_val = ff_data[ff_ptr];
+            }
+
+            // Compute min(1 - ff_val, gs_val)
+            sum += fminf(1.0f - ff_val, gs_val);
+
+            gs_ptr++;
+        }
+
+        inverse_overlaps[i * n_features + j] = sum;
+    }
+    """
+
+    module = xp.RawModule(code=kernel_code)
+    return module.get_function("compute_inverse_overlaps_sparse")
 
 @njit(parallel=True)
 def overlaps_cpu_parallel(fixed_features, data, indices, indptr, n_fixed_features, n_features):
