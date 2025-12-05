@@ -44,25 +44,8 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
             + " genes show no expression. Removing them from adata object"
         )
         adata = adata[:, keep_genes]
-    # Un-sparsify the data for clipping and scaling
-    scaled_expressions = adata.X.copy()
-    # Check if sparse, and convert to CSC
-    # Expectation is that if it is sparse at this stage, it'll be scipy sparse
-    scaled_expressions = adata.X.copy()
-    if spsparse.issparse(scaled_expressions):
-        if USING_GPU:
-            if spsparse.isspmatrix_csr(scaled_expressions):
-                scaled_expressions = xpsparse.csr_matrix(scaled_expressions)
-            elif spsparse.isspmatrix_csc(scaled_expressions):
-                scaled_expressions = xpsparse.csc_matrix(scaled_expressions)
-            elif spsparse.isspmatrix_coo(scaled_expressions):
-                scaled_expressions = xpsparse.coo_matrix(scaled_expressions)
-            elif spsparse.isspmatrix_dia(scaled_expressions):
-                scaled_expressions = xpsparse.dia_matrix(scaled_expressions)
-        # No matter what, convert to CSC for processing
-        scaled_expressions = scaled_expressions.tocsc()
-    else:
-        scaled_expressions = xpsparse.csc_matrix(scaled_expressions)
+    # Convert to CSC sparse matrix for processing using appropriate backend
+    scaled_expressions = _convert_sparse_array(adata.X.copy())
     if log_scale:
         scaled_expressions.data = xp.log2(scaled_expressions.data + 1)
     # Iterate through each gene
@@ -105,6 +88,25 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
     adata.layers["Scaled_Counts"] = scaled_expressions.astype(xp.float32)
     return adata
 
+def _convert_sparse_array(arr):
+    # If scipy sparse (specifically)
+    if spsparse.issparse(arr):
+        # If cupy used, appropriately convert from scipy
+        if USING_GPU:
+            if spsparse.isspmatrix_csr(arr):
+                arr = xpsparse.csr_matrix(arr)
+            elif spsparse.isspmatrix_csc(arr):
+                arr = xpsparse.csc_matrix(arr)
+            elif spsparse.isspmatrix_coo(arr):
+                arr = xpsparse.coo_matrix(arr)
+            elif spsparse.isspmatrix_dia(arr):
+                arr = xpsparse.dia_matrix(arr)
+        # No matter what, convert to CSC for processing
+        arr = arr.tocsc()
+    # If not sparse, convert to sparse with whatever backend is being used
+    else:
+        arr = xpsparse.csc_matrix(arr)
+    return arr
 
 def parallel_calc_es_matrices(
     adata,
@@ -138,6 +140,8 @@ def parallel_calc_es_matrices(
             "You have provided a 'secondary_features_label', implying that in the anndata object there is a corresponding csc_sparse martix object with rows as samples and columns as features. Each feature will be used to calculate ES scores for each of the variables of the adata object"
         )
         secondary_features = adata.obsm[secondary_features_label]
+        # Ensure sparse csc matrix with appropriate backend
+        secondary_features = _convert_sparse_array(secondary_features)
     #
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
@@ -819,11 +823,11 @@ def calc_ESSs_chunked(
     # Otherwise, process in chunks
     n_feats = RFms.shape[0]
     n_comps = RFms.shape[1]
-    final_ESSs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
-    final_D_EPs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
-    final_O_EPs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
-    final_SWs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
-    final_SGs = xp_mod.empty((n_feats, n_comps), dtype=xp_mod.float32)
+    final_ESSs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
+    final_D_EPs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
+    final_O_EPs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
+    final_SWs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
+    final_SGs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
 
     for start_idx in tqdm(range(0, n_feats, chunksize), desc="ESS Chunks"):
         end_idx = min(start_idx + chunksize, n_feats)

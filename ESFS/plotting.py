@@ -2,6 +2,7 @@ from typing import Optional
 import warnings
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from scipy.spatial.distance import pdist, squareform
 from sklearn.cluster import KMeans, HDBSCAN
@@ -11,6 +12,7 @@ from . import backend
 
 xp = backend.xp
 xpsparse = backend.xpsparse
+USING_GPU = backend.USING_GPU
 
 
 def knn_Smooth_Gene_Expression(
@@ -70,7 +72,7 @@ def ES_Rank_Genes(
     used_features_d_names = {v: k for k, v in used_features_d_idxs.items()}
     ##
     low_conn_idxs = xp.nonzero(xp.sum((masked_EPs > 0), axis=0) < min_edges)[0]
-    low_connectivity = [used_features_d_idxs[i] for i in low_conn_idxs]
+    low_connectivity = [used_features_d_idxs[int(i)] for i in low_conn_idxs]
     if exclude_genes is not None:
         remove_genes = list(set(exclude_genes) | set(low_connectivity))
     else:
@@ -100,7 +102,7 @@ def ES_Rank_Genes(
         used_features_d_names = {v: k for k, v in used_features_d_idxs.items()}
         print(f"Remaining genes = {len(used_features_d_idxs)}")
         remove_idxs = xp.nonzero(xp.sum((masked_EPs > 0), axis=0) < min_edges)[0]
-        remove_genes = [used_features_d_idxs[i] for i in remove_idxs]
+        remove_genes = [used_features_d_idxs[int(i)] for i in remove_idxs]
     ##
     # masked_ESSs = absolute_ESSs.copy()
     # masked_ESSs[xp.where((masked_EPs < EP_threshold) | (absolute_ESSs < ESS_threshold))] = 0
@@ -115,20 +117,25 @@ def ES_Rank_Genes(
         # print(used_features == list(used_features_d_names.keys()))
         # Get sorted indices by descending norm_network_feature_weights
         # Map sorted indices to gene names using used_features_idxs
-        rank_sorted_names = [used_features_d_idxs[i] for i in sorted_indices]
+        rank_sorted_names = [used_features_d_idxs[int(i)] for i in sorted_indices]
         gene_rank_dict = {gene: rank for rank, gene in enumerate(rank_sorted_names)}
         # Build dictionary of known important gene ranks
         df_ranks = {}
         for gene in known_important_genes:
-            df_ranks[gene] = gene_rank_dict.get(gene, xp.nan)
+            df_ranks[gene] = gene_rank_dict.get(gene, np.nan)
         df_ranks = pd.DataFrame(df_ranks, index=["Rank"])
         ##
         print("Known inportant gene ranks:")
         print(df_ranks)
     ##
-    norm_weights = pd.DataFrame(
-        norm_network_feature_weights[sorted_indices], index=rank_sorted_names
-    )
+    if USING_GPU:
+        norm_weights = pd.DataFrame(
+            norm_network_feature_weights[sorted_indices].get(), index=rank_sorted_names
+        )
+    else:
+        norm_weights = pd.DataFrame(
+            norm_network_feature_weights[sorted_indices], index=rank_sorted_names
+        )
     ranked_genes = pd.DataFrame(range(sorted_indices.shape[0]), index=rank_sorted_names)
     ##
     adata.var["ESFS_Gene_Weights"] = norm_weights
@@ -143,7 +150,7 @@ def plot_top_ranked_genes_UMAP(
     adata,
     top_ranked_genes,
     clustering="None",
-    known_important_genes=xp.array([]),
+    known_important_genes=np.array([]),
     UMAP_min_dist=0.1,
     UMAP_neighbours=20,
     hdbscan_min_cluster_size=50,
@@ -154,13 +161,18 @@ def plot_top_ranked_genes_UMAP(
         + str(top_ranked_genes)
         + " ranked genes in a UMAP."
     )
-    top_ESS_gene_idxs = xp.where(adata.var["ES_Rank"] < top_ranked_genes)[0]
+    top_ESS_gene_idxs = np.where(adata.var["ES_Rank"] < top_ranked_genes)[0]
     top_ESS_genes = adata.var["ES_Rank"].index[top_ESS_gene_idxs]
     ##
-    masked_ESSs = adata.varm[secondary_features_label + "_ESSs"].copy()[
-        xp.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
-    ]
-    # masked_ESSs[adata.varp["EPs"][xp.ix_(Top_ESS_Gene_idxs,Top_ESS_Gene_idxs)] < 0] = 0
+    if USING_GPU:
+        masked_ESSs = adata.varm[secondary_features_label + "_ESSs"].get()[
+            np.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
+        ].copy()
+    else:
+        masked_ESSs = adata.varm[secondary_features_label + "_ESSs"][
+            xp.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
+        ].copy()
+    # masked_ESSs[adata.varp["EPs"][np.ix_(Top_ESS_Gene_idxs,Top_ESS_Gene_idxs)] < 0] = 0
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         gene_embedding = umap.UMAP(
@@ -181,7 +193,7 @@ def plot_top_ranked_genes_UMAP(
         plt.scatter(gene_embedding[:, 0], gene_embedding[:, 1], s=7)
         plt.xlabel("UMAP 1", fontsize=16)
         plt.ylabel("UMAP 2", fontsize=16)
-        labels = xp.zeros(top_ranked_genes)
+        labels = np.zeros(top_ranked_genes)
     # Kmeans clustering
     if isinstance(clustering, int):
         print(
@@ -191,15 +203,15 @@ def plot_top_ranked_genes_UMAP(
             gene_embedding
         )
         labels = kmeans.labels_
-        unique_labels = xp.unique(labels)
+        unique_labels = np.unique(labels)
         #
         plt.figure(figsize=(5, 5))
         plt.title(
             "Top " + str(top_ranked_genes) + " genes UMAP\nClustering = Kmeans",
             fontsize=20,
         )
-        for i in xp.arange(unique_labels.shape[0]):
-            idxs = xp.where(labels == unique_labels[i])[0]
+        for i in np.arange(unique_labels.shape[0]):
+            idxs = np.where(labels == unique_labels[i])[0]
             plt.scatter(
                 gene_embedding[idxs, 0],
                 gene_embedding[idxs, 1],
@@ -215,18 +227,18 @@ def plot_top_ranked_genes_UMAP(
             "Clustering == 'hdbscan', set Clustering to an integer value for automated Kmeans clustering."
         )
         hdb = HDBSCAN(min_cluster_size=hdbscan_min_cluster_size)
-        xp.random.seed(42)
+        np.random.seed(42)
         hdb.fit(gene_embedding)
         labels = hdb.labels_
-        unique_labels = xp.unique(labels)
+        unique_labels = np.unique(labels)
         #
         plt.figure(figsize=(5, 5))
         plt.title(
             "Top " + str(top_ranked_genes) + " genes UMAP\nClustering = hdbscan",
             fontsize=20,
         )
-        for i in xp.arange(unique_labels.shape[0]):
-            idxs = xp.where(labels == unique_labels[i])[0]
+        for i in np.arange(unique_labels.shape[0]):
+            idxs = np.where(labels == unique_labels[i])[0]
             plt.scatter(
                 gene_embedding[idxs, 0],
                 gene_embedding[idxs, 1],
@@ -270,7 +282,7 @@ def get_gene_cluster_cell_UMAPs(
         "Generating the cell UMAP embeddings for each cluster of genes from the previous function."
     )
     if specific_cluster is None:
-        unique_gene_clust_labels = xp.unique(gene_clust_labels)
+        unique_gene_clust_labels = np.unique(gene_clust_labels)
     else:
         unique_gene_clust_labels = [specific_cluster]
     # Create containers for the selected genes and embeddings
@@ -290,7 +302,7 @@ def get_gene_cluster_cell_UMAPs(
         # xp.save(path + "Saved_ESFS_Genes.npy",xp.asarray(selected_genes))
         reduced_input_data = adata[:, selected_genes].X.A
         if log_transformed:
-            reduced_input_data = xp.log2(reduced_input_data + 1)
+            reduced_input_data = np.log2(reduced_input_data + 1)
         #
         # embedding_model = umap.UMAP(n_neighbors=n_neighbors, metric="correlation",min_dist=min_dist,n_components=2,random_state=42).fit(reduced_input_data)
         embedding_model = umap.UMAP(
