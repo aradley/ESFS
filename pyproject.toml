@@ -13,7 +13,7 @@ dependencies = [
     "pandas==2.2.3",
     "scipy==1.11.4",
     "matplotlib==3.7.3",
-    "scanpy==1.11.0",
+    "scanpy[leiden]==1.11.0",
     "scikit-learn",
     "plotly[express]",
     "multiprocess==0.70.17",
