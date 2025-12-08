@@ -9,11 +9,11 @@ with open("requirements.txt", "r") as f:
     requirements = [line.strip() for line in f.readlines()]
 
 setuptools.setup(
-    name="ESFS",
+    name="esfs",
     version="0.0.1",
     author="Arthur Radley",
     author_email="arthur_radley@hotmail.co.uk",
-    description="ESFS",
+    description="esfs",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/aradley/ESFS",
