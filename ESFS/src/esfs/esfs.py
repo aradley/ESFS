@@ -1015,12 +1015,13 @@ def ES_FMG(adata,N,Secondary_Features_Label,Input_Genes=np.array([]),Num_Reheats
             else:
                 End = 1
         #
-        Reheat_Num = int(np.ceil(N*0.25))
-        Random_Reheat_1 = np.random.choice(Input_Genes.shape[0],Reheat_Num,replace=False)
-        Random_Reheat_2 = np.random.randint(Chosen_Clusts.shape[0],size=Reheat_Num)
-        Chosen_Clusts[Random_Reheat_2] = Random_Reheat_1
-        Reheat = Reheat + 1
-        print("Reheat number: " + str(Reheat))
+        if Reheat <= Num_Reheats:
+            Reheat_Num = int(np.ceil(N*0.25))
+            Random_Reheat_1 = np.random.choice(Input_Genes.shape[0],Reheat_Num,replace=False)
+            Random_Reheat_2 = np.random.randint(Chosen_Clusts.shape[0],size=Reheat_Num)
+            Chosen_Clusts[Random_Reheat_2] = Random_Reheat_1
+            print("Reheat number: " + str(Reheat))
+            Reheat = Reheat + 1
     #
     Chosen_Pairwise_ESSs = Clust_ESSs[np.ix_(Chosen_Clusts,Chosen_Clusts)]
     return Best_Chosen_Clusters, Input_Genes[Best_Chosen_Clusters], Chosen_Pairwise_ESSs
