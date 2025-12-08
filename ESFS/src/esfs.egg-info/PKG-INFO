@@ -1,21 +1,36 @@
 Metadata-Version: 2.4
-Name: esfs
-Version: 0.1.0
-Summary: Entropy Sorting Feature Selection (ESFS) for scalable correlation and combinatorial marker discovery.
-Author-email: Your Name <you@example.com>
-License: MIT
-Project-URL: Homepage, https://github.com/aradley/ESFS
-Requires-Python: >=3.10
+Name: ESFS
+Version: 0.0.1
+Summary: ESFS
+Home-page: https://github.com/aradley/ESFS
+Author: Arthur Radley
+Author-email: arthur_radley@hotmail.co.uk
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
 Description-Content-Type: text/markdown
-Requires-Dist: numpy
-Requires-Dist: scipy
-Requires-Dist: pandas
-Requires-Dist: matplotlib
-Requires-Dist: anndata
-Requires-Dist: multiprocess
-Requires-Dist: p_tqdm
-Requires-Dist: scikit_learn
-Requires-Dist: umap_learn
+Requires-Dist: numpy<1.28,>=1.26
+Requires-Dist: scipy==1.11.4
+Requires-Dist: pandas==2.2.3
+Requires-Dist: matplotlib==3.7.3
+Requires-Dist: scikit-learn==1.5.2
+Requires-Dist: umap-learn==0.5.7
+Requires-Dist: multiprocess==0.70.18
+Requires-Dist: p-tqdm==1.4.2
+Requires-Dist: anndata==0.11.4
+Requires-Dist: plotly==6.5.0
+Requires-Dist: scanpy==1.11.1
+Requires-Dist: python-igraph==1.0.0
+Requires-Dist: leidenalg==0.11.0
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
 
 # ESFS
 
@@ -26,6 +41,8 @@ This repository is currently in development and likely to change, but the underl
 Go to the Example_Workflows folder to see some example workflows that you will hopefully be able to easily adapt for your own data.
 
 ### Installation
-1. Retreive the ripository with: git clone git@github.com:aradley/ESFS.git
-2. Navigate to the directory where the clone was downloaded to, for example: cd ESFS/
-3. Run the following on the command line: python3 setup.py install
+1. Close repository - `git clone https://github.com/aradley/ESFS.git`
+2. Enter the esfs directory - `cd ESFS`
+3. Create conda environment - `conda env create -f environment.yml`
+4. Activate conda environment - `conda activate ESFS_Env`
+

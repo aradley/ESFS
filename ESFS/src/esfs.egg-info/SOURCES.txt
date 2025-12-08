@@ -1,9 +1,9 @@
 README.md
-pyproject.toml
-src/esfs/__init__.py
-src/esfs/esfs.py
-src/esfs.egg-info/PKG-INFO
-src/esfs.egg-info/SOURCES.txt
-src/esfs.egg-info/dependency_links.txt
-src/esfs.egg-info/requires.txt
-src/esfs.egg-info/top_level.txt
+setup.py
+esfs/src/ESFS.egg-info/PKG-INFO
+esfs/src/ESFS.egg-info/SOURCES.txt
+esfs/src/ESFS.egg-info/dependency_links.txt
+esfs/src/ESFS.egg-info/requires.txt
+esfs/src/ESFS.egg-info/top_level.txt
+esfs/src/esfs/__init__.py
+esfs/src/esfs/esfs.py

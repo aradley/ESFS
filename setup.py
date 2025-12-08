@@ -9,15 +9,16 @@ with open("requirements.txt", "r") as f:
     requirements = [line.strip() for line in f.readlines()]
 
 setuptools.setup(
-    name="esfs",
+    name="ESFS",
     version="0.0.1",
     author="Arthur Radley",
     author_email="arthur_radley@hotmail.co.uk",
-    description="esfs",
+    description="ESFS",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/aradley/ESFS",
-    packages=setuptools.find_packages(),
+    package_dir={"": "esfs/src"},
+    packages=setuptools.find_packages(where="esfs/src"),
     install_requires=requirements,
     classifiers=[
         "Programming Language :: Python :: 3",
