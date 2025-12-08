@@ -8,5 +8,8 @@ Go to the Example_Workflows folder to see some example workflows that you will h
 
 ### Installation
 1. Retreive the ripository with: git clone git@github.com:aradley/ESFS.git
-2. Navigate to the directory where the clone was downloaded to, for example: cd ESFS/
-3. Run the following on the command line: python3 setup.py install
+
+conda create -n ESFS_Env python=3.11
+conda activate ESFS_Env
+conda install -c conda-forge numpy=1.26.4 scipy=1.11.4 pandas=2.2.3 matplotlib=3.7.3 scikit-learn=1.5.2 umap-learn=0.5.7 multiprocess p-tqdm anndata plotly scanpy ipywidgets notebook jupyterlab python-igraph leidenalg fastcluster
+

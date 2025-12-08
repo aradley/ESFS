@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+src/esfs/__init__.py
+src/esfs/esfs.py
+src/esfs.egg-info/PKG-INFO
+src/esfs.egg-info/SOURCES.txt
+src/esfs.egg-info/dependency_links.txt
+src/esfs.egg-info/requires.txt
+src/esfs.egg-info/top_level.txt

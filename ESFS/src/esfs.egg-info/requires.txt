@@ -1,0 +1,9 @@
+numpy
+scipy
+pandas
+matplotlib
+anndata
+multiprocess
+p_tqdm
+scikit_learn
+umap_learn
