@@ -8,7 +8,7 @@ Go to the Example_Workflows folder to see some example workflows that you will h
 
 ### Installation
 1. Close repository - `git clone https://github.com/aradley/ESFS.git`
-2. Enter the esfs directory - `cd esfs`
+2. Enter the esfs directory - `cd ESFS`
 3. Create conda environment - `conda env create -f environment.yml`
 4. Activate conda environment - `conda activate ESFS_Env`
 
