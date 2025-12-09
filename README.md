@@ -4,14 +4,14 @@ ESFS is an Entropy Sorting based feature selection package primarily developed f
 
 Go to the Example_Workflows folder to see some example workflows that you will hopefully be able to easily adapt for your own data.
 
-### Installation
+## Installation
 1. Clone repository - `git clone -b clean_workflows https://github.com/aradley/ESFS.git`
 2. Enter the ESFS directory - `cd ESFS`
 3. Create conda environment - `conda env create -f environment.yml`
 4. Activate conda environment - `conda activate ESFS_Env`
 5. Confirm installation in a Python shell - `import esfs`
 
-### Software overview
+## Software overview
 
 ![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
 
