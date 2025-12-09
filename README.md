@@ -11,7 +11,9 @@ Go to the Example_Workflows folder to see some example workflows that you will h
 4. Activate conda environment - `conda activate ESFS_Env`
 5. Confirm installation in a Python shell - `import esfs`
 
-![](Figure_1.png)
+### Software overview
+
+![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
 
 This repository is currently in development and likely to change, but the underlying cESFW theory should be locked in at this point.
 
