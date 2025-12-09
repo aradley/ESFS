@@ -1,2 +1,5 @@
 .venv/
 .vscode/esfs.egg-info/
+.pybiomart.sqlite
+.gitignore
+.DS_Store
