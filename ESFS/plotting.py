@@ -8,11 +8,11 @@ from scipy.spatial.distance import pdist, squareform
 from sklearn.cluster import KMeans, HDBSCAN
 import umap
 
-from . import backend
+from .backend import backend
 
 xp = backend.xp
 xpsparse = backend.xpsparse
-USING_GPU = backend.USING_GPU
+USING_GPU = backend.using_gpu
 
 
 def knn_Smooth_Gene_Expression(
