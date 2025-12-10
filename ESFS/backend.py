@@ -4,10 +4,14 @@ import numpy as np
 import scipy.sparse as spsparse
 
 # Set default to CPU packages (numpy/scipy)
-xp = np
-xpsparse = spsparse
-USING_GPU = False
 
+class ESFSBackend:
+    xp = np
+    xpsparse = spsparse
+    using_gpu = False
+    dtype = xp.float32
+
+backend = ESFSBackend()
 
 def _try_load_cupy():
     try:
@@ -40,15 +44,37 @@ def _try_load_cupy():
 
 def use_gpu():
     """Force GPU backend (if available)."""
-    global xp, xpsparse, USING_GPU
-    xp, xpsparse, USING_GPU = _try_load_cupy()
+    xp, xpsparse, using_gpu = _try_load_cupy()
+    backend.xp = xp
+    backend.xpsparse = xpsparse
+    backend.using_gpu = using_gpu
 
 
 def use_cpu():
     """Force CPU backend."""
-    global xp, xpsparse, USING_GPU
-    xp, xpsparse, USING_GPU = np, spsparse, False
+    backend.xp = np
+    backend.xpsparse = spsparse
+    backend.using_gpu = False
 
+def configure(gpu: bool, upcast: bool = False):
+    """Configure ESFS backend.
+
+    Parameters
+    ----------
+    use_gpu
+        Whether to use GPU backend (if available).
+    upcast
+        Whether to use float64 precision.
+    """
+    if gpu:
+        use_gpu()
+    else:
+        use_cpu()
+    if upcast:
+        backend.dtype = backend.xp.float64
+    else:
+        backend.dtype = backend.xp.float32
 
 # Try to use GPU backend by default, triggering on import
-use_gpu()
+# Use float32 as default to avoid memory issues
+configure(gpu=True, upcast=False)

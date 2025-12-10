@@ -17,11 +17,11 @@ from p_tqdm import p_map
 import scipy.sparse as spsparse
 from tqdm import tqdm
 
-from . import backend
+from .backend import backend
 
 xp = backend.xp
 xpsparse = backend.xpsparse
-USING_GPU = backend.USING_GPU
+USING_GPU = backend.using_gpu
 
 ###### Entropy Sorting (ES) metric calculations ######
 
@@ -152,9 +152,9 @@ def parallel_calc_es_matrices(
     # NOTE: .A is needed here for scipy, but incompatible with cupy.
     global feature_sums
     if not USING_GPU:
-        feature_sums = global_scaled_matrix.sum(axis=0).A[0]
+        feature_sums = global_scaled_matrix.sum(axis=0).A.flatten()
     else:
-        feature_sums = global_scaled_matrix.sum(axis=0)[0]
+        feature_sums = global_scaled_matrix.sum(axis=0).flatten()
     global minority_states
     minority_states = feature_sums.copy()
     idxs = xp.where(minority_states >= (sample_cardinality / 2))[0]
@@ -226,7 +226,7 @@ def parallel_calc_es_matrices(
         if (
             secondary_features_label == "Self"
         ):  ## The vast majority of outputs are symmetric, but float errors appear to make some non-symmetric. If we can fix this that could be cool.
-            ESSs = nanmaximum(ESSs, ESSs.T)
+            ESSs = ensure_symmetric(ESSs)
         #
         # Label_ESSs = pd.DataFrame(ESSs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
         adata.varm[secondary_features_label + "_ESSs"] = ESSs.T
@@ -242,7 +242,7 @@ def parallel_calc_es_matrices(
     if "EPs" in save_matrices:
         EPs = results[:, 1, :]
         if secondary_features_label == "Self":
-            EPs = nanmaximum(EPs, EPs.T)
+            EPs = ensure_symmetric(EPs)
         #
         # Label_EPs = pd.DataFrame(EPs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
         adata.varm[secondary_features_label + "_EPs"] = EPs.T
@@ -258,7 +258,7 @@ def parallel_calc_es_matrices(
     if "SWs" in save_matrices:
         SWs = results[:, 2, :]
         if secondary_features_label == "Self":
-            SWs = nanmaximum(SWs, SWs.T)
+            SWs = ensure_symmetric(SWs)
         #
         # Label_SWs = pd.DataFrame(SWs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
         adata.varm[secondary_features_label + "_SWs"] = SWs.T
@@ -274,7 +274,7 @@ def parallel_calc_es_matrices(
     if "SGs" in save_matrices:
         SGs = results[:, 3, :]
         if secondary_features_label == "Self":
-            SGs = nanmaximum(SGs, SGs.T)
+            SGs = ensure_symmetric(SGs)
         #
         # Label_SGs = pd.DataFrame(SGs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
         adata.varm[secondary_features_label + "_SGs"] = SGs.T
@@ -315,6 +315,11 @@ def nanmaximum(arr1, arr2):
     result[nan_mask] = xp.nan
     return result
 
+def ensure_symmetric(arr):
+    if USING_GPU:
+        return (arr + arr.T) / 2
+    else:
+        return nanmaximum(arr, arr.T)
 
 def calc_es_metrics(feature_ind, sample_cardinality):
     """
@@ -920,11 +925,11 @@ def calc_ESSs_chunked(
     # Otherwise, process in chunks
     n_feats = RFms.shape[0]
     n_comps = RFms.shape[1]
-    final_ESSs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
-    final_D_EPs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
-    final_O_EPs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
-    final_SWs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
-    final_SGs = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
+    final_ESSs = xp_mod.zeros((n_feats, n_comps), dtype=backend.dtype)
+    final_D_EPs = xp_mod.zeros((n_feats, n_comps), dtype=backend.dtype)
+    final_O_EPs = xp_mod.zeros((n_feats, n_comps), dtype=backend.dtype)
+    final_SWs = xp_mod.zeros((n_feats, n_comps), dtype=backend.dtype)
+    final_SGs = xp_mod.zeros((n_feats, n_comps), dtype=backend.dtype)
 
     for start_idx in tqdm(range(0, n_feats, chunksize), desc="ESS Chunks"):
         end_idx = min(start_idx + chunksize, n_feats)
@@ -974,11 +979,11 @@ def calc_ESSs_vec(
     # Create output arrays, with NaNs for easier later masking/maximum selection
     # NOTE: Using float32 to save memory, should be sufficient precision
     # NOTE: If needed, we can cut the first dim and iteratively store the max
-    all_ESSs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
-    all_D_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
-    all_O_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
-    all_SGs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
-    all_SWs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=xp_mod.float32)
+    all_ESSs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=backend.dtype)
+    all_D_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=backend.dtype)
+    all_O_EPs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=backend.dtype)
+    all_SGs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=backend.dtype)
+    all_SWs = xp_mod.full((4, n_feats, n_comps), xp_mod.nan, dtype=backend.dtype)
 
     for use_curve in range(4):
         curve_mask = case_patterns[case_idxs, use_curve] != 0
@@ -992,15 +997,15 @@ def calc_ESSs_vec(
         max_ent_x = max_ent_options[use_curve]
         SD_1_mask = (curve_overlaps < max_ent_x) & curve_mask
         SD1_mask = ~SD_1_mask & curve_mask
-        SDs = xp_mod.where(SD1_mask, 1.0, -1.0)
+        # NOTE: Returns float64 as default, so ensure consistent
+        SDs = xp_mod.where(SD1_mask, 1.0, -1.0).astype(backend.dtype)
         min_overlap, max_overlap = get_overlap_bounds_vec(
             use_curve, RFms=RFms, RFMs=RFMs, QFms=QFms, QFMs=QFMs, xp_mod=xp_mod
         )
         ind_X_1 = max_ent_x - min_overlap
         ind_X1 = max_overlap - max_ent_x
-        # NOTE: Again, force float32 to save memory
-        D = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)
-        O = xp_mod.zeros((n_feats, n_comps), dtype=xp_mod.float32)  # noqa: E741
+        D = xp_mod.zeros((n_feats, n_comps), dtype=backend.dtype)
+        O = xp_mod.zeros((n_feats, n_comps), dtype=backend.dtype)  # noqa: E741
         if use_curve == 0:
             D = xp_mod.where(SD_1_mask, curve_overlaps, RFms - curve_overlaps)
             O = xp_mod.where(  # noqa: E741
@@ -1485,7 +1490,6 @@ def ESE1(x, SD, RFm, RFM, QFm, QFM, Ts, max_overlap, xp_mod):
             * (-xp_mod.log((RFM[SD1_idxs] - QFm[SD1_idxs] + max_overlap[SD1_idxs]) / RFM[SD1_idxs]))
         )
     )
-    min_E[xp_mod.isnan(min_E)] = 0
     min_E[xp_mod.isnan(min_E)] = 0
     #
     CE[xp_mod.isnan(CE)] = min_E[xp_mod.isnan(CE)]
