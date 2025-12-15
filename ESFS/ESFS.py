@@ -1913,10 +1913,12 @@ def find_max_ESSs(adata, secondary_features_label, use_cores: int = -1, chunksiz
     max_ESSs, max_EPs, top_score_columns_combinations, top_score_secondary_features = (
         parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=use_cores, chunksize=chunksize)
     )
-    ## Compile results
+    # Compile results
     combinatorial_label_info = xp.column_stack(
         [xp.array(max_ESSs), xp.array(max_EPs)]
-    )  # ,xp.array(top_score_columns_combinations,dtype="object")])
+    )
+    if USING_GPU:
+        combinatorial_label_info = combinatorial_label_info.get()
     combinatorial_label_info = pd.DataFrame(
         combinatorial_label_info, index=adata.var_names, columns=["Max_ESSs", "EPs"]
     )  # ,"top_score_columns_combinations"])
@@ -1955,18 +1957,34 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
         "If progress bar freezes consider increasing system memory or reducing number of cores used with the 'use_cores' parameter as you may have hit a memory ceiling for your machine."
     )
     with np.errstate(divide="ignore", invalid="ignore"):
-        with ProcessPool(nodes=use_cores) as pool:
-            results = []
-            for res in tqdm(
-                pool.imap(
-                    partial(identify_max_ESSs, secondary_features=secondary_features, sorted_SGs_idxs=sorted_SGs_idxs),
-                    feature_inds,
-                    chunksize=chunksize if chunksize is not None else 1, # Default chunksize to 1 if not provided
-                ),
-                total=len(feature_inds),
-            ):
-                results.append(res)
-            pool.clear()
+        if USING_GPU:
+            # Use vectorized version for GPU
+            all_ESSs, all_EPs = identify_max_ESSs_vec(
+                feature_inds,
+                secondary_features,
+                sorted_SGs_idxs,
+                chunksize=chunksize
+            )
+            # Convert to list of results for compatibility with downstream code
+            results = [(all_ESSs[i], all_EPs[i]) for i in range(len(feature_inds))]
+        elif use_cores == 1:
+            results = [
+                identify_max_ESSs(FF_ind, secondary_features, sorted_SGs_idxs)
+                for FF_ind in tqdm(feature_inds)
+            ]
+        else:
+            with ProcessPool(nodes=use_cores) as pool:
+                results = []
+                for res in tqdm(
+                    pool.imap(
+                        partial(identify_max_ESSs, secondary_features=secondary_features, sorted_SGs_idxs=sorted_SGs_idxs),
+                        feature_inds,
+                        chunksize=chunksize if chunksize is not None else 1, # Default chunksize to 1 if not provided
+                    ),
+                    total=len(feature_inds),
+                ):
+                    results.append(res)
+                pool.clear()
     ## Extract results for each feature in adata
     max_ESSs = xp.zeros(len(results)).astype("f")
     max_EPs = xp.zeros(len(results)).astype("f")
@@ -1981,9 +1999,14 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
         top_score_columns_combinations[i] = sorted_SGs_idxs[i, :][
             xp.arange(0, max_ESS_idx + 1)
         ].tolist()
-        top_score_secondary_features[:, i] = (
-            secondary_features[:, top_score_columns_combinations[i]].sum(axis=1).A.reshape(-1)
-        )
+        if USING_GPU:
+            top_score_secondary_features[:, i] = (
+                secondary_features[:, top_score_columns_combinations[i]].sum(axis=1).reshape(-1)
+            )
+        else:
+            top_score_secondary_features[:, i] = (
+                secondary_features[:, top_score_columns_combinations[i]].sum(axis=1).A.reshape(-1)
+            )
     ## Return results
     return (
         max_ESSs,
@@ -2222,6 +2245,403 @@ def identify_max_ESSs_get_overlap_info(
         #
     return all_use_cases, all_overlaps_options, all_used_inds
 
+
+def identify_max_ESSs_vec(FF_inds, secondary_features, sorted_SGs_idxs, chunksize: Optional[int] = None):
+    """
+    Vectorized version of identify_max_ESSs that processes multiple fixed features at once.
+    """
+    sample_cardinality = global_scaled_matrix.shape[0]
+    n_features = len(FF_inds)
+    n_clusters = secondary_features.shape[1] - 1  # -1 because we delete the last cluster
+    # Extract fixed features
+    fixed_features = global_scaled_matrix[:, FF_inds]
+    # Calculate fixed feature statistics
+    if xpsparse.issparse(fixed_features):
+        if USING_GPU:
+            fixed_features_cardinality = fixed_features.sum(axis=0).flatten()
+        else:
+            fixed_features_cardinality = fixed_features.sum(axis=0).A.flatten()
+    else:
+        fixed_features_cardinality = fixed_features.sum(axis=0)
+    fixed_feature_minority_states = fixed_features_cardinality.copy()
+    idxs = fixed_features_cardinality >= (sample_cardinality / 2)
+    if idxs.any():
+        fixed_feature_minority_states[idxs] = sample_cardinality - fixed_features_cardinality[idxs]
+    ## Get sort orders for all features (delete last cluster from each)
+    all_sort_orders = xp.zeros((n_features, n_clusters), dtype=xp.int32)
+    for i, FF_ind_global in enumerate(FF_inds):
+        all_sort_orders[i] = xp.delete(sorted_SGs_idxs[FF_ind_global, :], -1)
+    ## Calculate secondary feature sums and minority states for all features
+    # Each feature has a unique sort order, so we need arrays for each
+    all_SF_sums = xp.zeros((n_features, n_clusters), dtype=backend.dtype)
+    all_SF_minority_states = xp.zeros((n_features, n_clusters), dtype=backend.dtype)
+    all_FF_QF_vs_RF = xp.zeros((n_features, n_clusters), dtype=bool)
+    # Loop over features to compute cumulative sums and related stats
+    # NOTE: Little fiddly to vec due to unique sort orders per feature, not perf critical, loop OK for now
+    for i in range(n_features):
+        sort_order = all_sort_orders[i]
+        if xpsparse.issparse(secondary_features):
+            sf_reordered = secondary_features.A[:, sort_order]
+        else:
+            sf_reordered = secondary_features[:, sort_order]
+        sf_cumsum = xp.cumsum(sf_reordered, axis=1)
+        SF_sums = sf_cumsum.sum(axis=0)
+        SF_minority_states = SF_sums.copy()
+        SF_minority_states[SF_minority_states >= (sample_cardinality / 2)] = (
+            sample_cardinality - SF_minority_states[SF_minority_states >= (sample_cardinality / 2)]
+        )
+        all_SF_sums[i] = SF_sums
+        all_SF_minority_states[i] = SF_minority_states
+        ## Identify where FF is the QF or RF
+        FF_QF_vs_RF = xp.zeros(SF_minority_states.shape[0])
+        FF_QF_vs_RF[xp.where(fixed_feature_minority_states[i] > SF_minority_states)[0]] = 1
+        all_FF_QF_vs_RF[i] = FF_QF_vs_RF
+    # Calculate the QFms, RFms, RFMs and QFMs for each FF and secondary feature pair
+    RFms = xp.where(~all_FF_QF_vs_RF, fixed_feature_minority_states[:, None], all_SF_minority_states)
+    QFms = xp.where(all_FF_QF_vs_RF, fixed_feature_minority_states[:, None], all_SF_minority_states)
+    RFMs = sample_cardinality - RFms
+    QFMs = sample_cardinality - QFms
+    # Calculate the values of (x) that correspond to the maximum for each overlap scenario (mm, Mm, mM and MM) (m = minority, M = majority)
+    max_ent_x_mm = (RFms * QFms) / (RFms + RFMs)
+    max_ent_x_Mm = (QFMs * RFms) / (RFms + RFMs)
+    max_ent_x_mM = (RFMs * QFms) / (RFms + RFMs)
+    max_ent_x_MM = (RFMs * QFMs) / (RFms + RFMs)
+    max_ent_options = xp.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
+    # Calculate the overlap between the FF states and the secondary features
+    overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup = (
+        identify_max_ESSs_compute_overlaps_batch(
+            fixed_features,
+            fixed_features_cardinality,
+            secondary_features,
+            all_sort_orders,
+            sample_cardinality,
+            all_SF_sums,
+            all_FF_QF_vs_RF,
+        )
+    )
+    # Having extracted the overlaps, calculate the ESS and EPs using chunked computation
+    all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_chunked(
+        RFms,
+        QFms,
+        RFMs,
+        QFMs,
+        max_ent_options,
+        sample_cardinality,
+        overlaps,
+        inverse_overlaps,
+        case_idxs,
+        case_patterns,
+        overlap_lookup,
+        xp_mod=xp,
+        chunksize=chunksize,
+    )
+    # Postprocess EPs
+    iden_feats, iden_cols = xp.nonzero(all_ESSs == 1)
+    all_D_EPs[iden_feats, iden_cols] = 0
+    all_O_EPs[iden_feats, iden_cols] = 0
+    all_EPs = nanmaximum(all_D_EPs, all_O_EPs)
+    return all_ESSs, all_EPs
+
+
+def identify_max_ESSs_compute_overlaps_batch(
+    fixed_features,
+    fixed_features_cardinality,
+    secondary_features,
+    sort_orders,
+    sample_cardinality,
+    all_SF_sums,
+    all_FF_QF_vs_RF,
+):
+    """
+    Compute overlaps between multiple fixed features and their respective cumulative secondary features.
+    Also computes case indices and lookup tables needed for ESS calculation.
+
+    Each fixed feature has a unique sort_order that determines how secondary features are reordered
+    and cumulatively summed.
+
+    Parameters
+    ----------
+    fixed_features : sparse matrix (n_samples x n_fixed_features)
+        The fixed features to compare
+    secondary_features : sparse matrix (n_samples x n_clusters)
+        The secondary features (one-hot clusters)
+    sort_orders : array (n_fixed_features x n_clusters)
+        Sort order for each fixed feature
+    sample_cardinality : int
+        Number of samples
+    all_SF_sums : array (n_fixed_features x n_clusters)
+        Secondary feature sums for each feature
+    all_FF_QF_vs_RF : array (n_fixed_features x n_clusters)
+        QF vs RF assignments for each feature
+
+    Returns
+    -------
+    overlaps : array (n_fixed_features x n_clusters)
+        Overlap values for each fixed feature with its cumulative secondary features
+    inverse_overlaps : array (n_fixed_features x n_clusters)
+        Inverse overlap values
+    case_idxs : array (n_fixed_features x n_clusters)
+        Case indices for each feature-cluster pair
+    case_patterns : array (8 x 4)
+        Case pattern lookup table
+    overlap_lookup : array (8 x 4)
+        Overlap source lookup table
+    """
+    n_fixed_features = fixed_features.shape[1] if fixed_features.shape[1] > 1 else len(sort_orders)
+    n_clusters = sort_orders.shape[1]
+
+    if USING_GPU:
+        # Use CUDA kernel for GPU processing
+        overlaps, inverse_overlaps = identify_max_ESSs_overlaps_cuda(
+            fixed_features,
+            secondary_features,
+            sort_orders,
+            sample_cardinality,
+            n_fixed_features,
+            n_clusters,
+        )
+    else:
+        # Call numba-accelerated function for rare vectorised CPU use
+        overlaps, inverse_overlaps = identify_max_ESSs_overlaps_numba(
+            fixed_features.data.astype(np.float32),
+            fixed_features.indices.astype(np.int32),
+            fixed_features.indptr.astype(np.int32),
+            secondary_features.data.astype(np.float32),
+            secondary_features.indices.astype(np.int32),
+            secondary_features.indptr.astype(np.int32),
+            sort_orders.astype(np.int32).ravel(),
+            sample_cardinality,
+            n_fixed_features,
+            n_clusters,
+        )
+        # Convert back to xp arrays if needed
+        if xp != np:
+            overlaps = xp.asarray(overlaps)
+            inverse_overlaps = xp.asarray(inverse_overlaps)
+    # Same case idx calculation as before
+    ff_is_min = (fixed_features_cardinality[:, None] < (sample_cardinality / 2))
+    sf_is_min = (all_SF_sums < (sample_cardinality / 2))
+    case_idxs = (
+        (ff_is_min.astype(int) << 2) + (sf_is_min.astype(int) << 1) + all_FF_QF_vs_RF.astype(int)
+    ).astype(xp.int8)
+    # Define case patterns (same for all features)
+    case_patterns = xp.array(
+        [
+            [0, -1, 0, 1],  # case_8: ff=0, sf=0, FF_QF_vs_RF=0
+            [0, 0, -1, 1],  # case_7: ff=0, sf=0, FF_QF_vs_RF=1
+            [-1, 0, 1, 0],  # case_6: ff=0, sf=1, FF_QF_vs_RF=0
+            [-1, 1, 0, 0],  # case_5: ff=0, sf=1, FF_QF_vs_RF=1
+            [0, 1, 0, -1],  # case_4: ff=1, sf=0, FF_QF_vs_RF=0
+            [0, 0, 1, -1],  # case_3: ff=1, sf=0, FF_QF_vs_RF=1
+            [1, 0, -1, 0],  # case_2: ff=1, sf=1, FF_QF_vs_RF=0
+            [1, -1, 0, 0],  # case_1: ff=1, sf=1, FF_QF_vs_RF=1
+        ],
+        dtype=xp.int8,
+    )
+    # Get overlap lookup
+    row_map = xp.stack(
+        [xp.argmax(case_patterns, axis=1), xp.argmin(case_patterns, axis=1)],
+        axis=1,
+        dtype=xp.int8,
+    )
+    overlap_lookup = xp.full((8, 4), -1, dtype=xp.int8)
+    # Put_along cupy fix as before
+    if USING_GPU:
+        overlap_lookup = xp.asnumpy(overlap_lookup).astype(xp.int8)
+        row_map = xp.asnumpy(row_map).astype(xp.int8)
+        np.put_along_axis(overlap_lookup, row_map, [0, 1], axis=1)
+        overlap_lookup = xp.asarray(overlap_lookup, dtype=xp.int8)
+    else:
+        xp.put_along_axis(overlap_lookup, row_map, [0, 1], axis=1)
+    return overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup
+
+
+@njit(parallel=True, cache=True)
+def identify_max_ESSs_overlaps_numba(
+    ff_data,
+    ff_indices,
+    ff_indptr,
+    sf_data,
+    sf_indices,
+    sf_indptr,
+    sort_orders,
+    n_samples,
+    n_fixed_features,
+    n_clusters,
+):
+    """
+    Numba-accelerated CPU version for computing overlaps with per-feature sort orders.
+
+    Computes min(ff[i], cumsum(sf[:, sort_order[i]])[:, j]) for each i, j combination
+    using sparse CSC format. CPU equivalent of identify_max_ESSs_overlaps_cuda.
+    Parameters
+    ----------
+    ff_data, ff_indices, ff_indptr : arrays
+        Fixed features in CSC sparse format
+    sf_data, sf_indices, sf_indptr : arrays
+        Secondary features in CSC sparse format
+    sort_orders : array (n_fixed_features × n_clusters, flattened)
+        Per-feature sort orders for reordering secondary features
+    overlaps, inverse_overlaps : arrays (n_fixed_features × n_clusters)
+        Output arrays (modified in-place)
+    n_samples, n_fixed_features, n_clusters : int
+        Matrix dimensions
+    """
+    overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
+    inverse_overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
+    # Parallel loop over fixed features and clusters
+    for ff_idx in prange(n_fixed_features):
+        for cumsum_idx in range(n_clusters):
+            # Get fixed feature column range
+            ff_start = ff_indptr[ff_idx]
+            ff_end = ff_indptr[ff_idx + 1]
+            overlap = 0.0
+            inverse_overlap = 0.0
+            # For each sample (row)
+            for sample in range(n_samples):
+                # Get fixed feature value at this sample
+                ff_val = 0.0
+                for ptr in range(ff_start, ff_end):
+                    if ff_indices[ptr] == sample:
+                        ff_val = ff_data[ptr]
+                        break
+                # Compute cumulative sum of secondary features up to cumsum_idx
+                # using this fixed feature's sort order
+                sf_cumsum = 0.0
+                for k in range(cumsum_idx + 1):
+                    # Get the cluster index from sort_order
+                    cluster_idx = sort_orders[ff_idx * n_clusters + k]
+                    # Get secondary feature value at this sample for this cluster
+                    sf_start = sf_indptr[cluster_idx]
+                    sf_end = sf_indptr[cluster_idx + 1]
+                    for ptr in range(sf_start, sf_end):
+                        if sf_indices[ptr] == sample:
+                            sf_cumsum += sf_data[ptr]
+                            break
+                # Accumulate min(ff, sf_cumsum) for overlap
+                overlap += min(ff_val, sf_cumsum)
+                # Accumulate min(1-ff, sf_cumsum) for inverse overlap
+                inverse_overlap += min(1.0 - ff_val, sf_cumsum)
+            overlaps[ff_idx, cumsum_idx] = overlap
+            inverse_overlaps[ff_idx, cumsum_idx] = inverse_overlap
+    return overlaps, inverse_overlaps
+
+
+def identify_max_ESSs_overlaps_cuda(
+    fixed_features,
+    secondary_features,
+    sort_orders,
+    sample_cardinality,
+    n_fixed_features,
+    n_clusters,
+):
+    """
+    CUDA kernel for computing overlaps with per-feature sort orders and cumulative sums.
+    This kernel computes min(ff[i], cumsum(sf[:, sort_order[i]])[:, j]) for each i, j combination.
+    """
+    kernel_code = r"""
+    extern "C" __global__
+    void compute_max_esss_overlaps(
+        const float* ff_data,
+        const int* ff_indices,
+        const int* ff_indptr,
+        const float* sf_data,
+        const int* sf_indices,
+        const int* sf_indptr,
+        const int* sort_orders,
+        float* overlaps,
+        float* inverse_overlaps,
+        int n_samples,
+        int n_fixed_features,
+        int n_clusters
+    ) {
+        int ff_idx = blockIdx.x * blockDim.x + threadIdx.x;  // fixed feature index
+        int cumsum_idx = blockIdx.y * blockDim.y + threadIdx.y;  // cumulative cluster index
+
+        if (ff_idx >= n_fixed_features || cumsum_idx >= n_clusters) return;
+
+        // Get fixed feature column
+        int ff_start = ff_indptr[ff_idx];
+        int ff_end = ff_indptr[ff_idx + 1];
+
+        float overlap = 0.0f;
+        float inverse_overlap = 0.0f;
+
+        // For each sample (row)
+        for (int sample = 0; sample < n_samples; sample++) {
+            // Get fixed feature value at this sample
+            float ff_val = 0.0f;
+            for (int ptr = ff_start; ptr < ff_end; ptr++) {
+                if (ff_indices[ptr] == sample) {
+                    ff_val = ff_data[ptr];
+                    break;
+                }
+            }
+
+            // Compute cumulative sum of secondary features up to cumsum_idx
+            // using this fixed feature's sort order
+            float sf_cumsum = 0.0f;
+            for (int k = 0; k <= cumsum_idx; k++) {
+                // Get the cluster index from sort_order
+                int cluster_idx = sort_orders[ff_idx * n_clusters + k];
+
+                // Get secondary feature value at this sample for this cluster
+                int sf_start = sf_indptr[cluster_idx];
+                int sf_end = sf_indptr[cluster_idx + 1];
+
+                for (int ptr = sf_start; ptr < sf_end; ptr++) {
+                    if (sf_indices[ptr] == sample) {
+                        sf_cumsum += sf_data[ptr];
+                        break;
+                    }
+                }
+            }
+
+            // Accumulate min(ff, sf_cumsum) for overlap
+            overlap += fminf(ff_val, sf_cumsum);
+
+            // Accumulate min(1-ff, sf_cumsum) for inverse overlap
+            // Assuming ff_val is in [0, 1] range after scaling
+            inverse_overlap += fminf(1.0f - ff_val, sf_cumsum);
+        }
+
+        overlaps[ff_idx * n_clusters + cumsum_idx] = overlap;
+        inverse_overlaps[ff_idx * n_clusters + cumsum_idx] = inverse_overlap;
+    }
+    """
+    module = xp.RawModule(code=kernel_code)
+    kernel = module.get_function("compute_max_esss_overlaps")
+    # Prepare arrays
+    overlaps = xp.zeros((n_fixed_features, n_clusters), dtype=xp.float32)
+    inverse_overlaps = xp.zeros((n_fixed_features, n_clusters), dtype=xp.float32)
+    # Convert to CSC format and ensure contiguous
+    ff_csc = fixed_features.tocsc()
+    sf_csc = secondary_features.tocsc()
+    # Launch kernel
+    block = (16, 16)
+    grid = (
+        (n_fixed_features + block[0] - 1) // block[0],
+        (n_clusters + block[1] - 1) // block[1],
+    )
+    kernel(
+        grid,
+        block,
+        (
+            ff_csc.data.astype(xp.float32),
+            ff_csc.indices,
+            ff_csc.indptr,
+            sf_csc.data.astype(xp.float32),
+            sf_csc.indices,
+            sf_csc.indptr,
+            sort_orders.astype(xp.int32).ravel(),
+            overlaps.ravel(),
+            inverse_overlaps.ravel(),
+            sample_cardinality,
+            n_fixed_features,
+            n_clusters,
+        ),
+    )
+    return overlaps, inverse_overlaps
 
 ##### Find minimal set of marker genes functions #####
 
