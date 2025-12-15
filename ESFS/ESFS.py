@@ -403,7 +403,10 @@ def calc_es_metrics_vec(
     ## Extract the Fixed Feature (FF)
     fixed_features = secondary_features[:, feature_inds]
     if xpsparse.issparse(fixed_features):
-        fixed_features_cardinality = fixed_features.sum(axis=0).flatten()
+        if USING_GPU:
+            fixed_features_cardinality = fixed_features.sum(axis=0).flatten()
+        else:
+            fixed_features_cardinality = fixed_features.sum(axis=0).A.flatten()
     else:
         fixed_features_cardinality = fixed_features.toarray().sum(axis=0)
     fixed_feature_minority_states = fixed_features_cardinality.copy()
@@ -440,7 +443,6 @@ def calc_es_metrics_vec(
         FF_QF_vs_RF,
         njobs=None if num_cores == -1 else num_cores,
     )
-
 
     all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_chunked(
         RFms,
@@ -488,7 +490,6 @@ def get_overlap_info(
     ## Pairwise calculate total overlaps of FF values with the values every other a feature in adata
     nonzero_inds = xp.where(fixed_feature != 0)[0]
     sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    # NOTE: Could remove .T[0] if remove [:, None] from fixed_feature, need to check downstream
     B = xpsparse.csc_matrix(
         (
             fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
@@ -994,6 +995,7 @@ def calc_ESSs_vec(
         if not xp_mod.any(curve_mask):
             continue
         overlap_source = overlap_lookup[case_idxs, use_curve]
+        # NOTE: Not sure if we should be upcasting here
         curve_overlaps = xp_mod.where(overlap_source == 0, overlaps, inverse_overlaps).astype(
             xp_mod.float64
         )
@@ -1866,7 +1868,7 @@ def ESE4_batched(x, SD, RFm, RFM, QFm, QFM, Ts, min_overlap, max_overlap, mask, 
 # that turns the the combinatorial problem into a linear one, which can be tractably solved in mamy practical scenarios.
 
 
-def find_max_ESSs(adata, secondary_features_label):
+def find_max_ESSs(adata, secondary_features_label, use_cores: int = -1, chunksize: Optional[int] = None):
     """
     This function takes an anndata object containing an attribute relating to a set of secondary_features and a attributes containing
     the ESS and SG Entropy Sorting metrics calculated pairwise for each feature secondary_features against each feature of the
@@ -1893,6 +1895,8 @@ def find_max_ESSs(adata, secondary_features_label):
     global_scaled_matrix = adata.layers["Scaled_Counts"]
     ### Extract the secondary_features object from adata
     secondary_features = adata.obsm[secondary_features_label]
+    # Ensure sparse csc matrix with appropriate backend
+    secondary_features = _convert_sparse_array(secondary_features)
     ### Extract the secondary_features ESSs from adata
     all_ESSs = adata.varm[secondary_features_label + "_ESSs"]
     initial_max_ESSs = xp.asarray(xp.max(all_ESSs, axis=1))
@@ -1907,7 +1911,7 @@ def find_max_ESSs(adata, secondary_features_label):
     sorted_SGs_idxs = xp.argsort(all_SGs)[:, ::-1]
     ### Parallel warpper function
     max_ESSs, max_EPs, top_score_columns_combinations, top_score_secondary_features = (
-        parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1)
+        parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=use_cores, chunksize=chunksize)
     )
     ## Compile results
     combinatorial_label_info = xp.column_stack(
@@ -1937,7 +1941,7 @@ def find_max_ESSs(adata, secondary_features_label):
     return adata
 
 
-def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1):
+def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1, chunksize: Optional[int] = None,):
     """
     Parallelised version of identify_max_ESSs function
     """
@@ -1950,23 +1954,25 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
     print(
         "If progress bar freezes consider increasing system memory or reducing number of cores used with the 'use_cores' parameter as you may have hit a memory ceiling for your machine."
     )
-    # if __name__ == '__main__':
     with np.errstate(divide="ignore", invalid="ignore"):
-        results = p_map(
-            partial(
-                identify_max_ESSs,
-                secondary_features=secondary_features,
-                sorted_SGs_idxs=sorted_SGs_idxs,
-            ),
-            feature_inds,
-            num_cpus=use_cores,
-        )
+        with ProcessPool(nodes=use_cores) as pool:
+            results = []
+            for res in tqdm(
+                pool.imap(
+                    partial(identify_max_ESSs, secondary_features=secondary_features, sorted_SGs_idxs=sorted_SGs_idxs),
+                    feature_inds,
+                    chunksize=chunksize if chunksize is not None else 1, # Default chunksize to 1 if not provided
+                ),
+                total=len(feature_inds),
+            ):
+                results.append(res)
+            pool.clear()
     ## Extract results for each feature in adata
     max_ESSs = xp.zeros(len(results)).astype("f")
     max_EPs = xp.zeros(len(results)).astype("f")
     top_score_columns_combinations = [[]] * len(results)
     top_score_secondary_features = xp.zeros((secondary_features.shape[0], feature_inds.shape[0]))
-    for i in xp.arange(len(results)):
+    for i in range(len(results)):
         ESSs = results[i][0]
         EPs = results[i][1]
         max_ESS_idx = xp.argmax(ESSs)
@@ -2047,7 +2053,7 @@ def identify_max_ESSs(FF_ind, secondary_features, sorted_SGs_idxs):
         secondary_features,
     )
     ## Having extracted the overlaps and their respective ESEs (1-4), calcualte the ESS and EPs
-    ESSs, D_EPs, O_EPs, SWs, SGs = calc_ESSs(
+    ESSs, D_EPs, O_EPs, SWs, SGs = calc_ESSs_old(
         RFms,
         QFms,
         RFMs,
@@ -2400,11 +2406,3 @@ def parallel_replace_clust(
     all_max_change_idxs = results[:, 1]
     all_max_replacement_scores = results[:, 2]
     return all_max_changes, all_max_change_idxs, all_max_replacement_scores
-
-
-#### ESFS workflow plotting functions ####
-
-
-
-
-######
