@@ -162,17 +162,8 @@ def parallel_calc_es_matrices(
     ####
     ## Provide indicies for parallel computing.
     feature_inds = xp.arange(secondary_features.shape[1])
-    ## Identify number of cores to use.
-    cores_avail = multiprocess.cpu_count()
-    # Special check if we're running in a SLURM environment, where CPU count does not match CPUs allocated
-    if "SLURM_CPUS_ON_NODE" in os.environ:
-        cores_avail = min(cores_avail, int(os.environ["SLURM_CPUS_ON_NODE"]))
-    print("Cores Available: " + str(cores_avail))
-    if use_cores == -1:
-        use_cores = cores_avail - 1  # -1 Is an arbitrary buffer of idle cores that I set.
-        if use_cores < 1:
-            use_cores = 1
-    print("Cores Used: " + str(use_cores))
+    # Get number of cores to use
+    use_cores = get_num_cores(use_cores)
     ## Perform calculations
     print("Calculating ESS and EP matricies.")
     print(
@@ -288,6 +279,18 @@ def parallel_calc_es_matrices(
         )
     return adata
 
+def get_num_cores(use_cores: int):
+    # Grab number of cores available
+    cores_avail = multiprocess.cpu_count()
+    # Special check if we're running in a SLURM environment, where CPU count does not match CPUs allocated
+    if "SLURM_CPUS_ON_NODE" in os.environ:
+        cores_avail = min(cores_avail, int(os.environ["SLURM_CPUS_ON_NODE"]))
+    print("Cores Available: " + str(cores_avail))
+    # If user sets -1, use all avail but one core (arbitrary buffer)
+    if use_cores == -1:
+        use_cores = max(cores_avail - 1, 1)
+    print("Cores Used: " + str(use_cores))
+    return use_cores
 
 def nanmaximum(arr1, arr2):
     """
@@ -1940,14 +1943,8 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
     """
     #
     feature_inds = xp.arange(sorted_SGs_idxs.shape[0])
-    #
-    cores_avail = multiprocess.cpu_count()
-    print("Cores Available: " + str(cores_avail))
-    if use_cores == -1:
-        use_cores = cores_avail - 1  # -1 Is an arbitrary buffer of idle cores that I set.
-        if use_cores < 1:
-            use_cores = 1
-    print("Cores Used: " + str(use_cores))
+    # Get number of cores to use
+    use_cores = get_num_cores(use_cores)
     ## Perform calculations
     print("Calculating ESS and EP matricies.")
     print(
