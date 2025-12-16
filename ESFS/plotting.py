@@ -3,6 +3,7 @@ import warnings
 
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
@@ -84,14 +85,14 @@ def knn_smooth_gene_expression(
     return adata
 
 
-def ES_Rank_Genes(
+def ES_rank_genes(
     adata,
-    ESS_threshold,
-    EP_threshold=0,
+    EP_threshold: float = 0.0,
+    ESS_threshold: float = 0.01,
     exclude_genes: Optional[tuple] = None,
     known_important_genes: Optional[tuple] = None,
-    secondary_features_label="Self",
-    min_edges=5,
+    secondary_features_label: str = "Self",
+    min_edges: int = 5,
 ):
     ##
     # ESSs = adata.varp['ESSs']
@@ -183,13 +184,14 @@ def ES_Rank_Genes(
 def plot_top_ranked_genes_UMAP(
     adata,
     top_ranked_genes,
-    clustering="None",
+    clustering: str | int | None = None,
     known_important_genes=np.array([]),
-    UMAP_min_dist=0.1,
-    UMAP_neighbours=20,
-    hdbscan_min_cluster_size=50,
-    secondary_features_label="Self",
-):
+    UMAP_min_dist: float = 0.1,
+    UMAP_neighbours: int = 20,
+    hdbscan_min_cluster_size: int = 50,
+    secondary_features_label: str = "Self",
+    random_state: int = 42,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     print(
         "Visualising the ESS graph of the top "
         + str(top_ranked_genes)
@@ -199,28 +201,28 @@ def plot_top_ranked_genes_UMAP(
     top_ESS_genes = adata.var["ES_Rank"].index[top_ESS_gene_idxs]
     ##
     if USING_GPU:
-        masked_ESSs = adata.varm[secondary_features_label + "_ESSs"].get()[
-            np.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
-        ].copy()
+        masked_ESSs = (
+            adata.varm[secondary_features_label + "_ESSs"]
+            .get()[np.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)]
+            .copy()
+        )
     else:
         masked_ESSs = adata.varm[secondary_features_label + "_ESSs"][
             xp.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
         ].copy()
-    # masked_ESSs[adata.varp["EPs"][np.ix_(Top_ESS_Gene_idxs,Top_ESS_Gene_idxs)] < 0] = 0
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         gene_embedding = umap.UMAP(
             n_neighbors=UMAP_neighbours,
             min_dist=UMAP_min_dist,
             n_components=2,
-            random_state=42,
+            random_state=random_state,
         ).fit_transform(masked_ESSs)
-        # gene_embedding = umap.UMAP(n_neighbors=UMAP_Neighbours, min_dist=UMAP_min_dist, n_components=2).fit_transform(masked_ESSs)
     ##
     # No clustering
-    if clustering == "None":
+    if clustering is None or clustering == "None":
         print(
-            "Clustering == 'None', set Clustering to numeric value for Kmeans clustering or 'hdbscan' for automated density clustering."
+            "Clustering == 'None', set clustering to numeric value for KMeans clustering or to 'hdbscan' for automated density clustering."
         )
         plt.figure(figsize=(5, 5))
         plt.title("Top " + str(top_ranked_genes) + " genes UMAP", fontsize=20)
@@ -229,7 +231,7 @@ def plot_top_ranked_genes_UMAP(
         plt.ylabel("UMAP 2", fontsize=16)
         labels = np.zeros(top_ranked_genes)
     # Kmeans clustering
-    if isinstance(clustering, int):
+    elif isinstance(clustering, int):
         print(
             "Clustering == an integer value leading to Kmeans clustering, set Clustering to 'hdbscan' for automated density clustering."
         )
@@ -256,7 +258,7 @@ def plot_top_ranked_genes_UMAP(
         plt.xlabel("UMAP 1", fontsize=16)
         plt.ylabel("UMAP 2", fontsize=16)
     # hdbscan clustering
-    if clustering == "hdbscan":
+    elif clustering == "hdbscan":
         print(
             "Clustering == 'hdbscan', set Clustering to an integer value for automated Kmeans clustering."
         )
@@ -282,6 +284,10 @@ def plot_top_ranked_genes_UMAP(
         #
         plt.xlabel("UMAP 1", fontsize=16)
         plt.ylabel("UMAP 2", fontsize=16)
+    else:
+        raise ValueError(
+            "Clustering must be None/'None', an integer value for KMeans clustering, or 'hdbscan' for automated density clustering."
+        )
     #
     if known_important_genes.shape[0] > 0:
         important_gene_idxs = top_ESS_genes.get_indexer(known_important_genes)
@@ -295,21 +301,25 @@ def plot_top_ranked_genes_UMAP(
             label="Known important genes",
         )
     #
+    plt.xticks([])
+    plt.yticks([])
     plt.legend()
     print(
-        "This function outputs the 'Top_ESS_Genes', 'Gene_Clust_Labels' and 'Gene_Embedding' objects in case users would like to investiage them further."
+        "This function outputs the 'Top_ESS_Genes', 'Gene_Clust_Labels' and 'Gene_Embedding' objects in case users would like to investigate them further."
     )
-    return top_ESS_genes, labels, gene_embedding
+    return top_ESS_genes.values, labels, gene_embedding
 
 
 def get_gene_cluster_cell_UMAPs(
     adata,
-    gene_clust_labels,
-    top_ESS_genes,
+    gene_clust_labels: np.ndarray,
+    top_ESS_genes: np.ndarray,
     n_neighbors: int,
     min_dist: float,
     log_transformed: bool,
     specific_cluster: Optional[int] = None,
+    metric: str = "correlation",
+    random_state: Optional[int] = None,
     **kwargs,
 ):
     print(
@@ -334,16 +344,16 @@ def get_gene_cluster_cell_UMAPs(
             continue
         gene_cluster_selected_genes.append(selected_genes)
         # xp.save(path + "Saved_ESFS_Genes.npy",xp.asarray(selected_genes))
-        reduced_input_data = adata[:, selected_genes].X.A
+        reduced_input_data = adata[:, selected_genes].X.A.copy()
         if log_transformed:
             reduced_input_data = np.log2(reduced_input_data + 1)
         #
-        # embedding_model = umap.UMAP(n_neighbors=n_neighbors, metric="correlation",min_dist=min_dist,n_components=2,random_state=42).fit(reduced_input_data)
         embedding_model = umap.UMAP(
             n_neighbors=n_neighbors,
-            metric="correlation",
+            metric=metric,
             min_dist=min_dist,
             n_components=2,
+            random_state=random_state,  # UMAP uses None as default
             **kwargs,
         ).fit(reduced_input_data)
         gene_cluster_embeddings.append(embedding_model.embedding_)
@@ -358,76 +368,92 @@ def plot_gene_cluster_cell_UMAPs(
     cell_label="None",
     ncol=1,
     log2_gene_expression: bool = True,
+    figsize: tuple = (18, 10),
+    marker_size: int = 3,
 ):
-    #
-    # TODO: Refactor this to move away from strings as we have done prev with `get_gene_cluster_cell_UMAPs`
+    num_plots = len(gene_cluster_embeddings)
+    nrow = int(np.ceil(num_plots / ncol))
+    # Check if cell_label is in adata.obs or adata.var
     if cell_label in adata.obs.columns:
         cell_labels = adata.obs[cell_label]
         unique_cell_labels = np.unique(cell_labels)
         #
-        for i, embedding in enumerate(gene_cluster_embeddings):
-            plt.figure(figsize=(7, 5))
-            plt.title(
-                "Cell UMAP"
-                + "\n"
-                + str(len(gene_cluster_selected_genes[i]))
-                + " genes",
-                fontsize=20,
+        fig, axes = plt.subplots(nrow, ncol, figsize=figsize, squeeze=False)
+        fig.suptitle(f"Cell UMAPs by '{cell_label}'", fontsize=20)
+
+        for idx, embedding in enumerate(gene_cluster_embeddings):
+            row, col = divmod(idx, ncol)
+            ax = axes[row, col]
+            ax.set_title(
+                f"Gene Cluster {idx} {len(gene_cluster_selected_genes[idx])} genes",
+                fontsize=14,
             )
-            for j in np.arange(unique_cell_labels.shape[0]):
-                IDs = np.where(cell_labels == unique_cell_labels[j])
-                plt.scatter(
-                    embedding[IDs, 0],
-                    embedding[IDs, 1],
-                    s=3,
-                    label=unique_cell_labels[j],
+            for label in unique_cell_labels:
+                label_idxs = np.where(cell_labels == label)
+                ax.scatter(
+                    embedding[label_idxs, 0],
+                    embedding[label_idxs, 1],
+                    s=marker_size,
+                    label=label,
                 )
-            #
-            plt.xlabel("UMAP 1", fontsize=16)
-            plt.ylabel("UMAP 2", fontsize=16)
-            #
-            if cell_label != "None":
-                # Adjust legend to be outside and below the plot
-                plt.legend(
-                    loc="center left",  # Align legend to the left of the bounding box
-                    bbox_to_anchor=(
-                        1,
-                        0.5,
-                    ),  # Position to the right and vertically centered
-                    ncol=1,  # Keep in a single column to span height
-                    fontsize=10,
-                    frameon=False,
-                    markerscale=5,
-                )
-    #
-    if np.isin(cell_label, adata.var.index):
-        #
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xlabel("UMAP 1", fontsize=12)
+            ax.set_ylabel("UMAP 2", fontsize=12)
+        # Move legend outside the last axis
+        handles, labels = ax.get_legend_handles_labels()
+        fig.legend(
+            handles, labels, loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=10
+        )
+        plt.tight_layout(rect=[0, 0, 0.85, 1])
+
+    elif cell_label in adata.var.index:
         expression = adata[:, cell_label].X.T
         if xpsparse.issparse(expression):
-            expression = expression.todense()
-        #
+            expression = expression.toarray()
+            if USING_GPU:
+                expression = expression.get()
         expression = np.asarray(expression)[0]
-        #
         if log2_gene_expression:
             expression = np.log2(expression + 1)
-        #
-        for i in np.arange(len(gene_cluster_embeddings)):
-            embedding = gene_cluster_embeddings[i]
-            plt.figure(figsize=(7, 5))
-            plt.title("Cell UMAP" + "\n" + cell_label, fontsize=20)
-            #
-            plt.scatter(
-                embedding[:, 0], embedding[:, 1], s=3, c=expression, cmap="seismic"
+
+        # Set up the overall grid: one extra column for the colorbar
+        fig = plt.figure(figsize=figsize)
+        outer_grid = gridspec.GridSpec(
+            nrow, ncol + 1, width_ratios=[1] * ncol + [0.05], wspace=0.3
+        )
+        fig.suptitle(f"Cell UMAPs colored by '{cell_label}' expression", fontsize=20)
+
+        for idx, Embedding in enumerate(gene_cluster_embeddings):
+            row, col = divmod(idx, ncol)
+            ax = fig.add_subplot(outer_grid[row, col])
+            Order = np.argsort(expression)
+            sc = ax.scatter(
+                Embedding[Order, 0],
+                Embedding[Order, 1],
+                s=marker_size,
+                c=expression[Order],
+                cmap="seismic",
             )
-            #
-            plt.xlabel("UMAP 1", fontsize=16)
-            plt.ylabel("UMAP 2", fontsize=16)
-            cb = plt.colorbar()
-            cb.set_label("$log_2$(Expression)", labelpad=-50, fontsize=10)
-    #
-    if not (np.isin(cell_label, adata.obs.columns)) & (
-        np.isin(cell_label, adata.var.index)
-    ):
+            ax.set_title(
+                f"Gene cluster {idx} ({gene_cluster_selected_genes[idx].shape[0]} genes)",
+                fontsize=12,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xlabel("UMAP 1", fontsize=10)
+            ax.set_ylabel("UMAP 2", fontsize=10)
+
+        # Add one colorbar on the rightmost column
+        cax = fig.add_subplot(outer_grid[:, -1])
+        cb = fig.colorbar(sc, cax=cax)
+        if log2_gene_expression:
+            cb.set_label("$log_2$(Expression)", fontsize=10)
+        else:
+            cb.set_label("Expression", fontsize=10)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+    else:
         print(
             "Cell label or gene not found in 'adata.obs.columns' or 'adata.var.index'"
         )
