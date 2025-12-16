@@ -2657,9 +2657,9 @@ def ES_FMG(
     N,
     secondary_features_label,
     input_genes: Optional[tuple[str]] = None,
-    num_reheats=5,
-    resolution=1,
-    use_cores=-1,
+    num_reheats: int = 3,
+    resolution: int = 1,
+    use_cores: int = -1,
 ):
     """
     Having used ES_CCF identify a set of features/clusters that maximise the ESS of each variable/column in adata and parallel_calc_es_matrices
@@ -2670,7 +2670,9 @@ def ES_FMG(
     cores_avail = multiprocess.cpu_count()
     print("Cores Available: " + str(cores_avail))
     if use_cores == -1:
-        use_cores = cores_avail - 1  # -1 Is an arbitrary buffer of idle cores that I set.
+        use_cores = (
+            cores_avail - 1
+        )  # -1 Is an arbitrary buffer of idle cores that I set.
         if use_cores < 1:
             use_cores = 1
     print("Cores Used: " + str(use_cores))
@@ -2692,17 +2694,18 @@ def ES_FMG(
     ###
     max_ESSs = xp.max(clust_ESSs, axis=1)
     ###
-    # TODO: Control seed for reproducibility
+    # TODO: Control seed for reproducibility?
     chosen_clusts = xp.random.choice(clust_ESSs.shape[0], N, replace=False)
     ###
     best_score = -xp.inf
-    reheat = 0
+    reheat = 1
     while reheat <= num_reheats:
         ###
         chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
         xp.fill_diagonal(chosen_pairwise_ESSs, 0)
         current_score = xp.sum(
-            max_ESSs[chosen_clusts] - (xp.max(chosen_pairwise_ESSs, axis=1) * resolution)
+            max_ESSs[chosen_clusts]
+            - (xp.max(chosen_pairwise_ESSs, axis=1) * resolution)
         )
         ###
         end = 0
@@ -2710,17 +2713,15 @@ def ES_FMG(
         while end == 0:
             ###
             all_max_changes, all_max_change_idxs, all_max_replacement_scores = (
-                all_max_changes,
-                all_max_change_idxs,
-                all_max_replacement_scores,
-            ) = parallel_replace_clust(
-                N,
-                chosen_pairwise_ESSs,
-                chosen_clusts,
-                current_score,
-                max_ESSs,
-                resolution,
-                use_cores=use_cores,
+                parallel_replace_clust(
+                    N,
+                    chosen_pairwise_ESSs,
+                    chosen_clusts,
+                    current_score,
+                    max_ESSs,
+                    resolution,
+                    use_cores=use_cores,
+                )
             )
             ###
             replace_clust_idx = xp.argmax(all_max_changes)
@@ -2734,7 +2735,8 @@ def ES_FMG(
                 chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
                 xp.fill_diagonal(chosen_pairwise_ESSs, 0)
                 current_score = xp.sum(
-                    max_ESSs[chosen_clusts] - (xp.max(chosen_pairwise_ESSs, axis=1) * resolution)
+                    max_ESSs[chosen_clusts]
+                    - (xp.max(chosen_pairwise_ESSs, axis=1) * resolution)
                 )
                 #
                 # print(current_score)
@@ -2745,13 +2747,15 @@ def ES_FMG(
             else:
                 end = 1
         #
-        reheat_num = int(xp.ceil(N * 0.25))
-        # TODO: Control seed for reproducibility
-        random_reheat_1 = xp.random.choice(len(input_genes), reheat_num, replace=False)
-        random_reheat_2 = xp.random.randint(chosen_clusts.shape[0], size=reheat_num)
-        chosen_clusts[random_reheat_2] = random_reheat_1
-        reheat = reheat + 1
-        print(f"Reheat number: {reheat}")
+        if reheat <= num_reheats:
+            reheat_num = int(np.ceil(N * 0.25))
+            random_reheat_1 = np.random.choice(
+                input_genes.shape[0], reheat_num, replace=False
+            )
+            random_reheat_2 = np.random.randint(chosen_clusts.shape[0], size=reheat_num)
+            chosen_clusts[random_reheat_2] = random_reheat_1
+            print(f"Reheat number: {reheat}")
+            reheat += 1
     #
     chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
     return (

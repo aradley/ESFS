@@ -1,11 +1,11 @@
 [project]
-name = "ESFW"
-description = "ESFW"
+name = "ESFS"
+description = "ESFS"
 version = "0.0.1"
 authors = [
     { name = "Arthur Radley", email = "arthur_radley@hotmail.co.uk"}
 ]
-readme = "README.md"
+readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.11"
 dependencies = [
     "anndata==0.11.1",
@@ -37,5 +37,4 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["ESFS"]
+where = ["src"]
