@@ -490,32 +490,38 @@ def get_overlap_info(
     ## Pairwise calculate total overlaps of FF values with the values every other a feature in adata
     nonzero_inds = xp.where(fixed_feature != 0)[0]
     sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    B = xpsparse.csc_matrix(
-        (
-            fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
-            sub_global_scaled_matrix.indices,
-            sub_global_scaled_matrix.indptr,
+    if (sub_global_scaled_matrix.indices.shape[0] > 0) and (nonzero_inds.shape[0] > 0):
+        B = xpsparse.csc_matrix(
+            (
+                fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
+                sub_global_scaled_matrix.indices,
+                sub_global_scaled_matrix.indptr,
+            )
         )
-    )
-    if USING_GPU:
-        overlaps = sub_global_scaled_matrix.minimum(B.tocsr()).sum(axis=0)[0]
+        if USING_GPU:
+            overlaps = sub_global_scaled_matrix.minimum(B.tocsr()).sum(axis=0)[0]
+        else:
+            overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
     else:
-        overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
+        overlaps = xp.zeros(global_scaled_matrix.shape[1])
     ## Pairwise calculate total overlaps of Inverse FF values with the values every other a feature in adata
     inverse_fixed_feature = 1 - fixed_feature  # xp.max(fixed_feature) - fixed_feature
     nonzero_inds = xp.where(inverse_fixed_feature != 0)[0]
     sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    B = xpsparse.csc_matrix(
-        (
-            inverse_fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
-            sub_global_scaled_matrix.indices,
-            sub_global_scaled_matrix.indptr,
+    if (sub_global_scaled_matrix.indices.shape[0] > 0) and (nonzero_inds.shape[0] > 0):
+        B = xpsparse.csc_matrix(
+            (
+                inverse_fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
+                sub_global_scaled_matrix.indices,
+                sub_global_scaled_matrix.indptr,
+            )
         )
-    )
-    if USING_GPU:
-        inverse_overlaps = sub_global_scaled_matrix.minimum(B.tocsr()).sum(axis=0)[0]
+        if USING_GPU:
+            inverse_overlaps = sub_global_scaled_matrix.minimum(B.tocsr()).sum(axis=0)[0]
+        else:
+            inverse_overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
     else:
-        inverse_overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
+        inverse_overlaps = xp.zeros(global_scaled_matrix.shape[1])
     ####
     ### Using the logical rules of ES to work out which ESE should be used for each pair of features beign compared.
     ## If FF is observed in it's minority state, use the following 4 steps to caclulate overlaps with every other feature
