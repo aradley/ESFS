@@ -1,10 +1,11 @@
 from typing import Optional
 import warnings
 
+from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.spatial.distance import pdist, squareform
+from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans, HDBSCAN
 import umap
 
@@ -15,34 +16,67 @@ xpsparse = backend.xpsparse
 USING_GPU = backend.using_gpu
 
 
-def knn_Smooth_Gene_Expression(
-    adata, use_genes, knn=30, metric="correlation", log_scale: bool = False
+def knn_smooth_gene_expression(
+    adata,
+    use_genes,
+    knn: int = 30,
+    metric: str = "correlation",
+    log_scale: bool = False,
+    batch_size: int = 1000,
+    n_jobs: int = -1,
 ):
-    #
-    print(
-        "Calculating pairwise cell-cell distance matrix. Distance metric = "
-        + metric
-        + ", knn = "
-        + str(knn)
-    )
-    if xpsparse.issparse(adata.X):
-        distmat = squareform(pdist(adata[:, use_genes].X.A, metric))
-        smoothed_expression = adata.X.A.copy()
-    else:
-        distmat = squareform(pdist(adata[:, use_genes].X, metric))
-        smoothed_expression = adata.X.copy()
-    neighbors = xp.sort(xp.argsort(distmat, axis=1)[:, 0:knn])
-    #
-    if log_scale:
-        smoothed_expression = xp.log2(smoothed_expression + 1)
-    #
-    neighbour_expression = smoothed_expression[neighbors]
-    smoothed_expression = xp.mean(neighbour_expression, axis=1)
+    assert metric == "correlation", "Currently only 'correlation' metric is supported."
 
+    use_gene_idxs = xp.nonzero(xp.isin(xp.asarray(adata.var_names), use_genes))[0]
+
+    # NOTE: If needed in future, could try to keep sparse, similar to create_scaled_matrix
+    X_subset = adata[:, use_gene_idxs].X
+    if xpsparse.issparse(X_subset):
+        X_subset = X_subset.toarray()
+    if log_scale:
+        X_subset = xp.log2(X_subset + 1)
+
+    n_cells = X_subset.shape[0]
     print(
-        "A Smoothed_Expression sparse csc_matrix matrix with knn = "
-        + str(knn)
-        + " has been saved to 'adata.layers['Smoothed_Expression']'"
+        f"Computing batched correlation distances for {n_cells} cells, batch size = {batch_size}"
+    )
+
+    # Simplify by ensuring remainder is done on CPU
+    if USING_GPU:
+        X_subset = X_subset.get()
+
+    # Function to compute distances for a batch
+    def compute_batch(i_start, i_end):
+        batch = X_subset[i_start:i_end]
+        dists = cdist(batch, X_subset, metric=metric)
+        # For each row, get top-k indices (excluding self optionally)
+        neighbors_batch = np.argpartition(dists, kth=knn, axis=1)[:, :knn]
+        return neighbors_batch
+
+    # Launch batches in parallel
+    batch_ranges = [
+        (i, min(i + batch_size, n_cells)) for i in range(0, n_cells, batch_size)
+    ]
+    all_neighbors = Parallel(n_jobs=n_jobs)(
+        delayed(compute_batch)(i_start, i_end) for (i_start, i_end) in batch_ranges
+    )
+
+    # Concatenate all neighbor indices
+    neighbors = np.vstack(all_neighbors)
+
+    # Get full expression matrix for smoothing
+    full_X = adata.X
+    if xpsparse.issparse(full_X):
+        full_X = full_X.toarray()
+        if USING_GPU:
+            full_X = full_X.get()
+    if log_scale:
+        full_X = np.log2(full_X + 1)
+
+    print(f"Smoothing expression matrix using mean over {knn} neighbors...")
+
+    smoothed_expression = np.array(
+        [np.mean(full_X[neighbor_idx], axis=0) for neighbor_idx in neighbors]
     )
     adata.layers["Smoothed_Expression"] = xpsparse.csc_matrix(
         smoothed_expression.astype(xp.float32)
