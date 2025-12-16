@@ -1868,7 +1868,7 @@ def ESE4_batched(x, SD, RFm, RFM, QFm, QFM, Ts, min_overlap, max_overlap, mask, 
 # that turns the the combinatorial problem into a linear one, which can be tractably solved in mamy practical scenarios.
 
 
-def find_max_ESSs(adata, secondary_features_label, use_cores: int = -1, chunksize: Optional[int] = None):
+def ES_CCF(adata, secondary_features_label, use_cores: int = -1, chunksize: Optional[int] = None):
     """
     This function takes an anndata object containing an attribute relating to a set of secondary_features and a attributes containing
     the ESS and SG Entropy Sorting metrics calculated pairwise for each feature secondary_features against each feature of the
@@ -2646,7 +2646,7 @@ def identify_max_ESSs_overlaps_cuda(
 ##### Find minimal set of marker genes functions #####
 
 
-def find_minimal_combinatorial_gene_set(
+def ES_FMG(
     adata,
     N,
     secondary_features_label,
@@ -2656,8 +2656,8 @@ def find_minimal_combinatorial_gene_set(
     use_cores=-1,
 ):
     """
-    Having used find_max_ESSs identify a set of features/clusters that maximise the ESS of each variable/column in adata and parallel_calc_es_matrices
-    to calculate the ESSs of every varible/column in adata in relation to each ESS_Max feature/cluster, we can now use find_minimal_combinatorial_gene_set
+    Having used ES_CCF identify a set of features/clusters that maximise the ESS of each variable/column in adata and parallel_calc_es_matrices
+    to calculate the ESSs of every varible/column in adata in relation to each ESS_Max feature/cluster, we can now use ES_FMG
     to identify a set of N clusters that maximally capture distinct gene expression patterns in the counts matrix of adata.
     """
     #
