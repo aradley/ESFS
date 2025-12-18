@@ -385,7 +385,7 @@ def plot_gene_cluster_cell_UMAPs(
             row, col = divmod(idx, ncol)
             ax = axes[row, col]
             ax.set_title(
-                f"Gene Cluster {idx} {len(gene_cluster_selected_genes[idx])} genes",
+                f"Gene Cluster {idx} ({len(gene_cluster_selected_genes[idx])} genes)",
                 fontsize=14,
             )
             for label in unique_cell_labels:
@@ -436,13 +436,13 @@ def plot_gene_cluster_cell_UMAPs(
                 cmap="seismic",
             )
             ax.set_title(
-                f"Gene cluster {idx} ({gene_cluster_selected_genes[idx].shape[0]} genes)",
-                fontsize=12,
+                f"Gene Cluster {idx} ({len(gene_cluster_selected_genes[idx])} genes)",
+                fontsize=14,
             )
             ax.set_xticks([])
             ax.set_yticks([])
-            ax.set_xlabel("UMAP 1", fontsize=10)
-            ax.set_ylabel("UMAP 2", fontsize=10)
+            ax.set_xlabel("UMAP 1", fontsize=12)
+            ax.set_ylabel("UMAP 2", fontsize=12)
 
         # Add one colorbar on the rightmost column
         cax = fig.add_subplot(outer_grid[:, -1])
