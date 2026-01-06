@@ -1,7 +1,12 @@
+import logging
 import warnings
 
 import numpy as np
 import scipy.sparse as spsparse
+
+# Configure logging
+logger = logging.getLogger("ESFS")
+logger.setLevel(logging.INFO)
 
 # Set default to CPU packages (numpy/scipy)
 
@@ -21,6 +26,7 @@ def _try_load_cupy():
         # Secondarily check if CUDA is available, in case it's run on e.g. different HPC partitions
         try:
             if _xp.cuda.is_available():
+                logger.info("Using CuPy GPU backend for ESFS.")
                 return _xp, _xpsparse, True
             else:
                 warnings.warn(
