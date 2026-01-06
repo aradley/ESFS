@@ -145,6 +145,11 @@ def ES_rank_genes(
     ##
     print("Calculating feature weights")
     feature_weights = xp.average(masked_ESSs, weights=masked_EPs, axis=0)
+    # Add check for no remaining genes to avoid inserting empty arrays
+    if feature_weights.size == 0:
+        raise ValueError(
+            "No genes remain after pruning. Consider changing threshold or min_edges parameters."
+        )
     sig_genes_per_gene = (masked_EPs > EP_threshold).sum(1)
     norm_network_feature_weights = feature_weights / sig_genes_per_gene
     ##
