@@ -280,6 +280,10 @@ def parallel_calc_es_matrices(
             + secondary_features_label
             + "_SGs']'"
         )
+    # Quick attempt to clean up GPU memory
+    if USING_GPU:
+        results = None
+        xp.get_default_memory_pool().free_all_blocks()
     return adata
 
 def get_num_cores(use_cores: int):
