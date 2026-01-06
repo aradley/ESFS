@@ -1,6 +1,6 @@
 [project]
-name = "ESFS"
-description = "ESFS"
+name = "esfs"
+description = "esfs"
 version = "0.0.1"
 authors = [
     { name = "Arthur Radley", email = "arthur_radley@hotmail.co.uk"}
