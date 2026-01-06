@@ -88,7 +88,7 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
     adata.layers["Scaled_Counts"] = scaled_expressions.astype(xp.float32)
     return adata
 
-def _convert_sparse_array(arr):
+def _convert_sparse_array(arr, to_scipy: bool = False):
     # If scipy sparse (specifically)
     if spsparse.issparse(arr):
         # If cupy used, appropriately convert from scipy
@@ -106,6 +106,9 @@ def _convert_sparse_array(arr):
     # If not sparse, convert to sparse with whatever backend is being used
     else:
         arr = xpsparse.csc_matrix(arr)
+    # If user wants scipy sparse output, convert back
+    if to_scipy and USING_GPU:
+        arr = arr.get()
     return arr
 
 def parallel_calc_es_matrices(
