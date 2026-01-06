@@ -11,6 +11,7 @@ import anndata as ad
 import multiprocess
 from numba import njit, prange
 import numpy as np
+from numpy.typing import ArrayLike
 import pandas as pd
 from pathos.pools import ProcessPool
 from p_tqdm import p_map
@@ -223,7 +224,7 @@ def parallel_calc_es_matrices(
             ESSs = ensure_symmetric(ESSs)
         #
         # Label_ESSs = pd.DataFrame(ESSs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
-        adata.varm[secondary_features_label + "_ESSs"] = ESSs.T
+        adata.varm[secondary_features_label + "_ESSs"] = convert_to_numpy(ESSs.T)
         print(
             "ESSs for "
             + secondary_features_label
@@ -239,7 +240,7 @@ def parallel_calc_es_matrices(
             EPs = ensure_symmetric(EPs)
         #
         # Label_EPs = pd.DataFrame(EPs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
-        adata.varm[secondary_features_label + "_EPs"] = EPs.T
+        adata.varm[secondary_features_label + "_EPs"] = convert_to_numpy(EPs.T)
         print(
             "EPs for "
             + secondary_features_label
@@ -255,7 +256,7 @@ def parallel_calc_es_matrices(
             SWs = ensure_symmetric(SWs)
         #
         # Label_SWs = pd.DataFrame(SWs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
-        adata.varm[secondary_features_label + "_SWs"] = SWs.T
+        adata.varm[secondary_features_label + "_SWs"] = convert_to_numpy(SWs.T)
         print(
             "SWs for "
             + secondary_features_label
@@ -271,7 +272,7 @@ def parallel_calc_es_matrices(
             SGs = ensure_symmetric(SGs)
         #
         # Label_SGs = pd.DataFrame(SGs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
-        adata.varm[secondary_features_label + "_SGs"] = SGs.T
+        adata.varm[secondary_features_label + "_SGs"] = convert_to_numpy(SGs.T)
         print(
             "SGs for "
             + secondary_features_label
@@ -330,6 +331,45 @@ def ensure_symmetric(arr):
         return (arr + arr.T) / 2
     else:
         return nanmaximum(arr, arr.T)
+
+def convert_to_numpy(
+    arrs: list[ArrayLike] | tuple[ArrayLike] | ArrayLike
+) -> list[ArrayLike] | tuple[ArrayLike] | ArrayLike:
+    """
+    Helper function that converts output array/arrays to numpy if using GPU backend.
+    """
+    if USING_GPU:
+        if isinstance(arrs, (list, tuple)):
+            return type(arrs)([xp.asnumpy(arr) for arr in arrs])
+        else:
+            return arrs.get()
+    else:
+        return arrs
+
+def move_to_gpu(
+    arrs: list[ArrayLike] | tuple[ArrayLike] | ArrayLike
+) -> list[ArrayLike] | tuple[ArrayLike] | ArrayLike:
+    """
+    Helper function that moves input array/arrays to GPU if using GPU backend.
+    """
+    if USING_GPU:
+        if isinstance(arrs, (list, tuple)):
+            output = []
+            for arr in arrs:
+                # If not an array, then sparse matrix
+                if not isinstance(arr, np.ndarray):
+                    output.append(_convert_sparse_array(arr))
+                else:
+                    output.append(xp.asarray(arr))
+            return type(arrs)(output)
+        else:
+            # If not an array, then sparse matrix
+            if not isinstance(arrs, np.ndarray):
+                return _convert_sparse_array(arrs)
+            else:
+                return xp.asarray(arrs)
+    else:
+        return arrs
 
 def calc_es_metrics(feature_ind, sample_cardinality):
     """
