@@ -2656,7 +2656,7 @@ def ES_FMG(
     adata,
     N,
     secondary_features_label,
-    input_genes: Optional[tuple[str]] = None,
+    input_genes: None | tuple[str] | list[str] = None,
     num_reheats: int = 3,
     resolution: int = 1,
     use_cores: int = -1,
@@ -2666,16 +2666,8 @@ def ES_FMG(
     to calculate the ESSs of every varible/column in adata in relation to each ESS_Max feature/cluster, we can now use ES_FMG
     to identify a set of N clusters that maximally capture distinct gene expression patterns in the counts matrix of adata.
     """
-    #
-    cores_avail = multiprocess.cpu_count()
-    print("Cores Available: " + str(cores_avail))
-    if use_cores == -1:
-        use_cores = (
-            cores_avail - 1
-        )  # -1 Is an arbitrary buffer of idle cores that I set.
-        if use_cores < 1:
-            use_cores = 1
-    print("Cores Used: " + str(use_cores))
+    # Get number of cores to use
+    use_cores = get_num_cores(use_cores)
     # Gene set optimisation
     if input_genes is None:
         # input_genes = xp.array(adata.var_names.tolist())
@@ -2687,25 +2679,25 @@ def ES_FMG(
     #
     ###
     global clust_ESSs
-    clust_ESSs = xp.asarray(adata.varm[secondary_features_label + "_ESSs"])[
-        xp.ix_(input_gene_idxs, input_gene_idxs)
+    clust_ESSs = np.asarray(adata.varm[secondary_features_label + "_ESSs"])[
+        np.ix_(input_gene_idxs, input_gene_idxs)
     ]
     clust_ESSs[clust_ESSs < 0] = 0
     ###
-    max_ESSs = xp.max(clust_ESSs, axis=1)
+    max_ESSs = np.max(clust_ESSs, axis=1)
     ###
     # TODO: Control seed for reproducibility?
-    chosen_clusts = xp.random.choice(clust_ESSs.shape[0], N, replace=False)
+    chosen_clusts = np.random.choice(clust_ESSs.shape[0], N, replace=False)
     ###
-    best_score = -xp.inf
+    best_score = -np.inf
     reheat = 1
     while reheat <= num_reheats:
         ###
-        chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
-        xp.fill_diagonal(chosen_pairwise_ESSs, 0)
-        current_score = xp.sum(
+        chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
+        np.fill_diagonal(chosen_pairwise_ESSs, 0)
+        current_score = np.sum(
             max_ESSs[chosen_clusts]
-            - (xp.max(chosen_pairwise_ESSs, axis=1) * resolution)
+            - (np.max(chosen_pairwise_ESSs, axis=1) * resolution)
         )
         ###
         end = 0
@@ -2724,7 +2716,7 @@ def ES_FMG(
                 )
             )
             ###
-            replace_clust_idx = xp.argmax(all_max_changes)
+            replace_clust_idx = np.argmax(all_max_changes)
             if all_max_changes[replace_clust_idx] > 0:
                 # print(all_max_replacement_scores[replace_clust_idx])
                 replacement_clust_idx = all_max_change_idxs[replace_clust_idx]
@@ -2732,11 +2724,11 @@ def ES_FMG(
                 # print(Replacement_Gene_Ind)
                 chosen_clusts[replace_clust_idx] = replacement_clust_idx
                 #
-                chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
-                xp.fill_diagonal(chosen_pairwise_ESSs, 0)
-                current_score = xp.sum(
+                chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
+                np.fill_diagonal(chosen_pairwise_ESSs, 0)
+                current_score = np.sum(
                     max_ESSs[chosen_clusts]
-                    - (xp.max(chosen_pairwise_ESSs, axis=1) * resolution)
+                    - (np.max(chosen_pairwise_ESSs, axis=1) * resolution)
                 )
                 #
                 # print(current_score)
@@ -2750,14 +2742,14 @@ def ES_FMG(
         if reheat <= num_reheats:
             reheat_num = int(np.ceil(N * 0.25))
             random_reheat_1 = np.random.choice(
-                input_genes.shape[0], reheat_num, replace=False
+                len(input_genes), reheat_num, replace=False
             )
             random_reheat_2 = np.random.randint(chosen_clusts.shape[0], size=reheat_num)
             chosen_clusts[random_reheat_2] = random_reheat_1
             print(f"Reheat number: {reheat}")
             reheat += 1
     #
-    chosen_pairwise_ESSs = clust_ESSs[xp.ix_(chosen_clusts, chosen_clusts)]
+    chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
     return (
         best_chosen_clusters,
         [input_genes[i] for i in best_chosen_clusters],
@@ -2773,31 +2765,31 @@ def replace_clust(
     max_ESSs,
     resolution,
 ):
-    sub_chosen_clusts = xp.delete(chosen_clusts, replace_idx)
+    sub_chosen_clusts = np.delete(chosen_clusts, replace_idx)
     #
-    sub_chosen_pairwise_ESSs = xp.delete(
+    sub_chosen_pairwise_ESSs = np.delete(
         chosen_pairwise_ESSs, replace_idx, axis=0
     )  # Delete a row, which should be the cluster
-    sub_chosen_pairwise_ESSs = xp.delete(sub_chosen_pairwise_ESSs, replace_idx, axis=1)
-    sub_2nd_maxs = xp.max(sub_chosen_pairwise_ESSs, axis=1)
+    sub_chosen_pairwise_ESSs = np.delete(sub_chosen_pairwise_ESSs, replace_idx, axis=1)
+    sub_2nd_maxs = np.max(sub_chosen_pairwise_ESSs, axis=1)
     replacement_columns = clust_ESSs[sub_chosen_clusts, :]
-    replacement_columns[(xp.arange(sub_chosen_clusts.shape[0]), sub_chosen_clusts)] = 0
-    sub_2nd_maxs = xp.maximum(sub_2nd_maxs[:, xp.newaxis], replacement_columns)
+    replacement_columns[(np.arange(sub_chosen_clusts.shape[0]), sub_chosen_clusts)] = 0
+    sub_2nd_maxs = np.maximum(sub_2nd_maxs[:, np.newaxis], replacement_columns)
     #
-    replacement_scores_1 = xp.sum(
-        (max_ESSs[sub_chosen_clusts, xp.newaxis] - (sub_2nd_maxs * resolution)), axis=0
+    replacement_scores_1 = np.sum(
+        (max_ESSs[sub_chosen_clusts, np.newaxis] - (sub_2nd_maxs * resolution)), axis=0
     )
     #
     replacement_rows = clust_ESSs[:, sub_chosen_clusts]
-    replacement_rows[(sub_chosen_clusts, xp.arange(sub_chosen_clusts.shape[0]))] = 0
+    replacement_rows[(sub_chosen_clusts, np.arange(sub_chosen_clusts.shape[0]))] = 0
     #
-    replacement_scores_2 = max_ESSs - (xp.max(replacement_rows, axis=1) * resolution)
+    replacement_scores_2 = max_ESSs - (np.max(replacement_rows, axis=1) * resolution)
     #
     replacement_scores = replacement_scores_1 + replacement_scores_2
     ###
     changes = replacement_scores - current_score
-    changes[chosen_clusts] = -xp.inf
-    max_idx = xp.argmax(changes)
+    changes[chosen_clusts] = -np.inf
+    max_idx = np.argmax(changes)
     max_change = changes[max_idx]
     # all_max_changes[i] = max_change
     # all_max_change_idxs[i] = max_idx
@@ -2815,7 +2807,7 @@ def parallel_replace_clust(
     resolution,
     use_cores,
 ):
-    replace_idxs = xp.arange(N)
+    replace_idxs = np.arange(N)
     #
     pool = multiprocess.Pool(processes=use_cores)
     results = pool.map(
@@ -2831,7 +2823,7 @@ def parallel_replace_clust(
     )
     pool.close()
     pool.join()
-    results = xp.asarray(results)
+    results = np.asarray(results)
     all_max_changes = results[:, 0]
     all_max_change_idxs = results[:, 1]
     all_max_replacement_scores = results[:, 2]
