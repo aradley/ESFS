@@ -11,6 +11,7 @@ from sklearn.cluster import KMeans, HDBSCAN
 import umap
 
 from .backend import backend
+from .ESFS import _convert_sparse_array, move_to_gpu, convert_to_numpy
 
 xp = backend.xp
 xpsparse = backend.xpsparse
@@ -79,8 +80,8 @@ def knn_smooth_gene_expression(
     smoothed_expression = np.array(
         [np.mean(full_X[neighbor_idx], axis=0) for neighbor_idx in neighbors]
     )
-    adata.layers["Smoothed_Expression"] = xpsparse.csc_matrix(
-        smoothed_expression.astype(xp.float32)
+    adata.layers["Smoothed_Expression"] = _convert_sparse_array(
+        smoothed_expression.astype(np.float32), to_scipy=True
     )
     return adata
 
@@ -96,8 +97,8 @@ def ES_rank_genes(
 ):
     ##
     # ESSs = adata.varp['ESSs']
-    masked_ESSs = adata.varm[secondary_features_label + "_ESSs"].copy()
-    masked_EPs = adata.varm[secondary_features_label + "_EPs"].copy()
+    masked_ESSs = move_to_gpu(adata.varm[secondary_features_label + "_ESSs"].copy())
+    masked_EPs = move_to_gpu(adata.varm[secondary_features_label + "_EPs"].copy())
     mask = (masked_EPs < EP_threshold) | (masked_ESSs < ESS_threshold)
     masked_ESSs[mask] = 0
     masked_EPs[mask] = 0
@@ -163,14 +164,10 @@ def ES_rank_genes(
         print("Known inportant gene ranks:")
         print(df_ranks)
     ##
-    if USING_GPU:
-        norm_weights = pd.DataFrame(
-            norm_network_feature_weights[sorted_indices].get(), index=rank_sorted_names
-        )
-    else:
-        norm_weights = pd.DataFrame(
-            norm_network_feature_weights[sorted_indices], index=rank_sorted_names
-        )
+    norm_network_feature_weights = convert_to_numpy(norm_network_feature_weights)
+    norm_weights = pd.DataFrame(
+        norm_network_feature_weights[sorted_indices], index=rank_sorted_names
+    )
     ranked_genes = pd.DataFrame(range(sorted_indices.shape[0]), index=rank_sorted_names)
     ##
     adata.var["ESFS_Gene_Weights"] = norm_weights
@@ -200,16 +197,9 @@ def plot_top_ranked_genes_UMAP(
     top_ESS_gene_idxs = np.where(adata.var["ES_Rank"] < top_ranked_genes)[0]
     top_ESS_genes = adata.var["ES_Rank"].index[top_ESS_gene_idxs]
     ##
-    if USING_GPU:
-        masked_ESSs = (
-            adata.varm[secondary_features_label + "_ESSs"]
-            .get()[np.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)]
-            .copy()
-        )
-    else:
-        masked_ESSs = adata.varm[secondary_features_label + "_ESSs"][
-            xp.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
-        ].copy()
+    masked_ESSs = adata.varm[secondary_features_label + "_ESSs"][
+        np.ix_(top_ESS_gene_idxs, top_ESS_gene_idxs)
+    ].copy()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         gene_embedding = umap.UMAP(

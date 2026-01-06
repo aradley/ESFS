@@ -36,6 +36,9 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
     Prior to calculates ES metrics, the data will be scaled to have values
     between 0 and 1.
     """
+    # Although we expect adata.X to be sparse, as we call getnnz, need to convert if not
+    # Ensure scipy due to cupy getnnz issue
+    adata.X = _convert_sparse_array(adata.X, to_scipy=True)
     # Filter genes with no expression
     # NOTE: Using numpy easier here, it isn't performance-critical code
     keep_genes = adata.var_names[np.nonzero(adata.X.getnnz(axis=0) > 50)[0]]
@@ -336,7 +339,7 @@ def convert_to_numpy(
     arrs: list[ArrayLike] | tuple[ArrayLike] | ArrayLike
 ) -> list[ArrayLike] | tuple[ArrayLike] | ArrayLike:
     """
-    Helper function that converts output array/arrays to numpy if using GPU backend.
+    Helper function that converts output array/arrays to numpy if using GPU backend (otherwise no change).
     """
     if USING_GPU:
         if isinstance(arrs, (list, tuple)):
@@ -350,7 +353,7 @@ def move_to_gpu(
     arrs: list[ArrayLike] | tuple[ArrayLike] | ArrayLike
 ) -> list[ArrayLike] | tuple[ArrayLike] | ArrayLike:
     """
-    Helper function that moves input array/arrays to GPU if using GPU backend.
+    Helper function that moves input array/arrays to GPU if using GPU backend (otherwise no change).
     """
     if USING_GPU:
         if isinstance(arrs, (list, tuple)):
@@ -1951,11 +1954,11 @@ def ES_CCF(adata, secondary_features_label, use_cores: int = -1, chunksize: Opti
     # Ensure sparse csc matrix with appropriate backend
     secondary_features = _convert_sparse_array(secondary_features)
     ### Extract the secondary_features ESSs from adata
-    all_ESSs = adata.varm[secondary_features_label + "_ESSs"]
+    all_ESSs = move_to_gpu(adata.varm[secondary_features_label + "_ESSs"])
     initial_max_ESSs = xp.asarray(xp.max(all_ESSs, axis=1))
     max_ESSs = initial_max_ESSs.copy()
     ### Extract the secondary_features SGs from adata
-    all_SGs = xp.asarray(adata.varm[secondary_features_label + "_SGs"]).copy()
+    all_SGs = move_to_gpu(adata.varm[secondary_features_label + "_SGs"].copy())
     all_SGs[all_ESSs < 0] = (
         all_SGs[all_ESSs < 0] * -1
     )  # For ordering we need to include the SG sort directions which we can extract from the ESSs
@@ -1984,8 +1987,8 @@ def ES_CCF(adata, secondary_features_label, use_cores: int = -1, chunksize: Opti
         + "']'"
     )
     ### Save the new features/clusters that maximise the ESS scores of each feature in adata
-    adata.obsm[secondary_features_label + "_Max_ESS_Features"] = xpsparse.csc_matrix(
-        top_score_secondary_features.astype("f")
+    adata.obsm[secondary_features_label + "_Max_ESS_Features"] = _convert_sparse_array(
+        top_score_secondary_features.astype("f"), to_scipy=True
     )
     print(
         "The features/clusters relating to each max_ESS have been saved in 'adata.obsm['"
@@ -2701,8 +2704,8 @@ def identify_max_ESSs_overlaps_cuda(
 
 def ES_FMG(
     adata,
-    N,
-    secondary_features_label,
+    N: int,
+    secondary_features_label: str,
     input_genes: None | tuple[str] | list[str] = None,
     num_reheats: int = 3,
     resolution: int = 1,
