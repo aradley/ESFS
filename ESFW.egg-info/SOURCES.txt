@@ -1,9 +1,0 @@
-README.md
-setup.py
-ESFS/ESFS.py
-ESFS/__init__.py
-ESFW.egg-info/PKG-INFO
-ESFW.egg-info/SOURCES.txt
-ESFW.egg-info/dependency_links.txt
-ESFW.egg-info/requires.txt
-ESFW.egg-info/top_level.txt

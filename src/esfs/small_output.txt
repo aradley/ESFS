@@ -1,0 +1,983 @@
+Timer unit: 1e-06 s
+
+Total time: 0.061362 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: Create_Scaled_Matrix at line 38
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+    38                                           @profile
+    39                                           def Create_Scaled_Matrix(adata, clip_percentile=97.5, log_scale=False):
+    40                                               """
+    41                                               Prior to calculates ES metrics, the data will be scaled to have values
+    42                                               between 0 and 1.
+    43                                               """
+    44                                               # Filter genes with no expression
+    45         1       4314.0   4314.0      7.0      Keep_Genes = Keep_Genes = adata.var_names[np.where(adata.X.getnnz(axis=0) > 50)[0]]
+    46         1          9.0      9.0      0.0      if Keep_Genes.shape[0] < adata.shape[1]:
+    47         2         20.0     10.0      0.0          print(
+    48         2          3.0      1.5      0.0              str(adata.shape[1] - Keep_Genes.shape[0])
+    49         1          0.0      0.0      0.0              + " genes show no expression. Removing them from adata object"
+    50                                                   )
+    51         1       1264.0   1264.0      2.1          adata = adata[:, Keep_Genes]
+    52                                               # Un-sparsify the data for clipping and scaling
+    53         1       3373.0   3373.0      5.5      Scaled_Expressions = adata.X.copy()
+    54         1          0.0      0.0      0.0      if issparse(Scaled_Expressions) == True:
+    55         1        915.0    915.0      1.5          Scaled_Expressions = np.asarray(Scaled_Expressions.todense())
+    56                                               # Log scale the data if user requests.
+    57         1          1.0      1.0      0.0      if log_scale == True:
+    58                                                   Scaled_Expressions = np.log2(Scaled_Expressions + 1)
+    59                                               # Clip exceptionally high gene expression for each gene. Default percentile is the 97.5th.
+    60         1      19903.0  19903.0     32.4      Upper = np.percentile(Scaled_Expressions, clip_percentile, axis=0)
+    61         2        559.0    279.5      0.9      Upper[np.where(Upper == 0)[0]] = np.max(Scaled_Expressions, axis=0)[
+    62         1         10.0     10.0      0.0          np.where(Upper == 0)[0]
+    63                                               ]
+    64         1       2764.0   2764.0      4.5      Scaled_Expressions = Scaled_Expressions.clip(max=Upper[None, :])
+    65                                               # Normalise gene expression between 0 and 1.
+    66         1       2371.0   2371.0      3.9      Scaled_Expressions = Scaled_Expressions / Upper
+    67                                               # Return data as a sparse csc_matrix
+    68         1      25841.0  25841.0     42.1      adata.layers["Scaled_Counts"] = csc_matrix(Scaled_Expressions.astype("f"))
+    69         2         13.0      6.5      0.0      print(
+    70         1          1.0      1.0      0.0          "Scaled expression matrix has been saved to 'adata.layers['Scaled_Counts']' as a sparse csc_matrix"
+    71                                               )
+    72         1          1.0      1.0      0.0      return adata
+
+Total time: 1.50266 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: ESE3 at line 909
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   909                                           @profile
+   910                                           def ESE3(x, SD, RFm, RFM, QFm, QFM, Ts, Min_Overlap):
+   911                                               """
+   912                                               This function takes the observed inputs and uses the ESE3 formulation of ES to caclulate the observed Conditional Entropy (CE),
+   913                                               Independent Entropy (Ind_E) and Minimum Entropy (Min_E).
+   914                                               """
+   915     12824      27228.0      2.1      1.8      G1_E = (RFm / Ts) * (
+   916                                                   (
+   917     12824     158576.0     12.4     10.6              -(((QFm - x) / RFm) * np.log((QFm - x) / RFm))
+   918      6412     176905.0     27.6     11.8              - (((RFm - QFm + x) / RFm) * np.log((RFm - QFm + x) / RFm))
+   919                                                   )
+   920                                               )
+   921     12824      27239.0      2.1      1.8      G2_E = (RFM / Ts) * (
+   922                                                   (
+   923     12824     111406.0      8.7      7.4              -(((x) / RFM) * np.log((x) / RFM))
+   924      6412     142995.0     22.3      9.5              - (((RFM - x) / RFM) * np.log((RFM - x) / RFM))
+   925                                                   )
+   926                                               )
+   927      6412      64005.0     10.0      4.3      CE = np.where(np.isnan(G1_E), 0, G1_E) + np.where(np.isnan(G2_E), 0, G2_E)
+   928      6412     157877.0     24.6     10.5      Ind_E = (QFm / Ts) * (-np.log((QFm / Ts))) + (QFM / Ts) * (-np.log((QFM / Ts)))
+   929                                               #
+   930      6412       6068.0      0.9      0.4      Min_E = np.zeros(SD.shape[0])
+   931      6412      30967.0      4.8      2.1      SD_1_Inds = np.where(SD == -1)[0]
+   932     12824      52297.0      4.1      3.5      Min_E[SD_1_Inds] = (RFM[SD_1_Inds] / Ts) * (
+   933                                                   (
+   934     12824       9633.0      0.8      0.6              -(
+   935     12824      34125.0      2.7      2.3                  ((Min_Overlap[SD_1_Inds]) / RFM[SD_1_Inds])
+   936      6412      55083.0      8.6      3.7                  * np.log((Min_Overlap[SD_1_Inds]) / RFM[SD_1_Inds])
+   937                                                       )
+   938                                                       - (
+   939     12824      44727.0      3.5      3.0                  ((RFM[SD_1_Inds] - Min_Overlap[SD_1_Inds]) / RFM[SD_1_Inds])
+   940      6412      67815.0     10.6      4.5                  * np.log((RFM[SD_1_Inds] - Min_Overlap[SD_1_Inds]) / RFM[SD_1_Inds])
+   941                                                       )
+   942                                                   )
+   943                                               )
+   944      6412      30422.0      4.7      2.0      SD1_Inds = np.where(SD == 1)[0]
+   945     12824      44296.0      3.5      2.9      Min_E[SD1_Inds] = (RFM[SD1_Inds] / Ts) * (
+   946                                                   (
+   947     12824       9115.0      0.7      0.6              -(
+   948     12824      51781.0      4.0      3.4                  ((RFM[SD1_Inds] - QFM[SD1_Inds] + RFm[SD1_Inds]) / RFM[SD1_Inds])
+   949     12824      25079.0      2.0      1.7                  * np.log(
+   950      6412      43024.0      6.7      2.9                      (RFM[SD1_Inds] - QFM[SD1_Inds] + RFm[SD1_Inds]) / RFM[SD1_Inds]
+   951                                                           )
+   952                                                       )
+   953                                                       - (
+   954     12824      36816.0      2.9      2.5                  ((QFM[SD1_Inds] - RFm[SD1_Inds]) / RFM[SD1_Inds])
+   955      6412      54880.0      8.6      3.7                  * np.log((QFM[SD1_Inds] - RFm[SD1_Inds]) / RFM[SD1_Inds])
+   956                                                       )
+   957                                                   )
+   958                                               )
+   959      6412      15660.0      2.4      1.0      Min_E[np.isnan(Min_E)] = 0
+   960                                               #
+   961      6412      14775.0      2.3      1.0      CE[np.isnan(CE)] = Min_E[np.isnan(CE)]
+   962      6412       9862.0      1.5      0.7      return CE, Ind_E, Min_E
+
+Total time: 1.54208 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: ESE2 at line 853
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   853                                           @profile
+   854                                           def ESE2(x, SD, RFm, RFM, QFm, QFM, Ts):
+   855                                               """
+   856                                               This function takes the observed inputs and uses the ESE2 formulation of ES to caclulate the observed Conditional Entropy (CE),
+   857                                               Independent Entropy (Ind_E) and Minimum Entropy (Min_E).
+   858                                               """
+   859     12822      32223.0      2.5      2.1      G1_E = (RFm / Ts) * (
+   860                                                   (
+   861     12822     172209.0     13.4     11.2              -(((RFm - x) / RFm) * np.log((RFm - x) / RFm))
+   862      6411     118345.0     18.5      7.7              - (((x) / RFm) * np.log((x) / RFm))
+   863                                                   )
+   864                                               )
+   865     12822      40685.0      3.2      2.6      G2_E = (RFM / Ts) * (
+   866                                                   (
+   867     12822     160292.0     12.5     10.4              -(((RFM - QFM + x) / RFM) * np.log((RFM - QFM + x) / RFM))
+   868      6411     147256.0     23.0      9.5              - (((QFM - x) / RFM) * np.log((QFM - x) / RFM))
+   869                                                   )
+   870                                               )
+   871      6411      66393.0     10.4      4.3      CE = np.where(np.isnan(G1_E), 0, G1_E) + np.where(np.isnan(G2_E), 0, G2_E)
+   872      6411     158805.0     24.8     10.3      Ind_E = (QFm / Ts) * (-np.log((QFm / Ts))) + (QFM / Ts) * (-np.log((QFM / Ts)))
+   873                                               #
+   874      6411       6296.0      1.0      0.4      Min_E = np.zeros(SD.shape[0])
+   875      6411      31554.0      4.9      2.0      SD_1_Inds = np.where(SD == -1)[0]
+   876     12822      51812.0      4.0      3.4      Min_E[SD_1_Inds] = (RFM[SD_1_Inds] / Ts) * (
+   877                                                   (
+   878     12822      10609.0      0.8      0.7              -(
+   879     12822      50827.0      4.0      3.3                  ((RFM[SD_1_Inds] - QFM[SD_1_Inds]) / RFM[SD_1_Inds])
+   880      6411      68854.0     10.7      4.5                  * np.log((RFM[SD_1_Inds] - QFM[SD_1_Inds]) / RFM[SD_1_Inds])
+   881                                                       )
+   882                                                       - (
+   883     12822      29585.0      2.3      1.9                  ((QFM[SD_1_Inds]) / RFM[SD_1_Inds])
+   884      6411      53619.0      8.4      3.5                  * np.log((QFM[SD_1_Inds]) / RFM[SD_1_Inds])
+   885                                                       )
+   886                                                   )
+   887                                               )
+   888      6411      31403.0      4.9      2.0      SD1_Inds = np.where(SD == 1)[0]
+   889     12822      45770.0      3.6      3.0      Min_E[SD1_Inds] = (RFM[SD1_Inds] / Ts) * (
+   890                                                   (
+   891     12822      11970.0      0.9      0.8              -(
+   892     12822      52790.0      4.1      3.4                  ((RFM[SD1_Inds] - QFM[SD1_Inds] + RFm[SD1_Inds]) / RFM[SD1_Inds])
+   893     12822      25654.0      2.0      1.7                  * np.log(
+   894      6411      44092.0      6.9      2.9                      (RFM[SD1_Inds] - QFM[SD1_Inds] + RFm[SD1_Inds]) / RFM[SD1_Inds]
+   895                                                           )
+   896                                                       )
+   897                                                       - (
+   898     12822      37967.0      3.0      2.5                  ((QFM[SD1_Inds] - RFm[SD1_Inds]) / RFM[SD1_Inds])
+   899      6411      55784.0      8.7      3.6                  * np.log((QFM[SD1_Inds] - RFm[SD1_Inds]) / RFM[SD1_Inds])
+   900                                                       )
+   901                                                   )
+   902                                               )
+   903      6411      11872.0      1.9      0.8      Min_E[np.isnan(Min_E)] = 0
+   904                                               #
+   905      6411      14625.0      2.3      0.9      CE[np.isnan(CE)] = Min_E[np.isnan(CE)]
+   906      6411      10792.0      1.7      0.7      return CE, Ind_E, Min_E
+
+Total time: 2.41001 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: nanmaximum at line 233
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   233                                           @profile
+   234                                           def nanmaximum(arr1, arr2):
+   235                                               """
+   236                                               Element-wise maximum of two arrays, ignoring NaN values and converting inf to -inf.
+   237                                           
+   238                                               Parameters:
+   239                                                   arr1 (ndarray): First input array.
+   240                                                   arr2 (ndarray): Second input array.
+   241                                           
+   242                                               Returns:
+   243                                                   ndarray: Element-wise maximum of arr1 and arr2, ignoring NaN values.
+   244                                               """
+   245                                               # Replace all inf and -inf values with -inf for both arrays
+   246      6414     380253.0     59.3     15.8      arr1 = np.where(np.isinf(arr1), -np.inf, arr1)
+   247      6414     237773.0     37.1      9.9      arr2 = np.where(np.isinf(arr2), -np.inf, arr2)
+   248                                               # Replace NaN values with -infinity for comparison
+   249      6414     303489.0     47.3     12.6      arr1_nan = np.where(np.isnan(arr1), -np.inf, arr1)
+   250      6414     382686.0     59.7     15.9      arr2_nan = np.where(np.isnan(arr2), -np.inf, arr2)
+   251                                               # Compute the element-wise maximum
+   252      6414     776121.0    121.0     32.2      result = np.maximum(arr1_nan, arr2_nan)
+   253                                               # Where both values are NaN, the result should be NaN
+   254      6414     314808.0     49.1     13.1      nan_mask = np.isnan(arr1) & np.isnan(arr2)
+   255      6414      11151.0      1.7      0.5      result[nan_mask] = np.nan
+   256      6414       3726.0      0.6      0.2      return result
+
+Total time: 2.91741 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: ESE1 at line 801
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   801                                           @profile
+   802                                           def ESE1(x, SD, RFm, RFM, QFm, QFM, Ts, Max_Overlap):
+   803                                               """
+   804                                               This function takes the observed inputs and uses the ESE1 formulation of ES to caclulate the observed Conditional Entropy (CE),
+   805                                               Independent Entropy (Ind_E) and Minimum Entropy (Min_E).
+   806                                               """
+   807     12824      50206.0      3.9      1.7      G1_E = (RFm / Ts) * (
+   808     12824     264647.0     20.6      9.1          (((x) / RFm) * (-np.log((x) / RFm)))
+   809      6412     288670.0     45.0      9.9          + (((RFm - x) / RFm) * (-np.log((RFm - x) / RFm)))
+   810                                               )
+   811     12824      38670.0      3.0      1.3      G2_E = (RFM / Ts) * (
+   812     12824     343389.0     26.8     11.8          (((QFm - x) / RFM) * (-np.log((QFm - x) / RFM)))
+   813      6412     318561.0     49.7     10.9          + (((RFM - QFm + x) / RFM) * (-np.log((RFM - QFm + x) / RFM)))
+   814                                               )
+   815      6412     156834.0     24.5      5.4      CE = np.where(np.isnan(G1_E), 0, G1_E) + np.where(np.isnan(G2_E), 0, G2_E)
+   816      6412     285423.0     44.5      9.8      Ind_E = (QFm / Ts) * (-np.log((QFm / Ts))) + (QFM / Ts) * (-np.log((QFM / Ts)))
+   817                                               #
+   818      6412       7303.0      1.1      0.3      Min_E = np.zeros(SD.shape[0])
+   819      6412      29880.0      4.7      1.0      SD_1_Inds = np.where(SD == -1)[0]
+   820     12824      21369.0      1.7      0.7      Min_E[SD_1_Inds] = (RFM[SD_1_Inds] / Ts) * (
+   821      6412       2871.0      0.4      0.1          (
+   822     12824      12397.0      1.0      0.4              ((QFm[SD_1_Inds]) / RFM[SD_1_Inds])
+   823      6412       9463.0      1.5      0.3              * (-np.log((QFm[SD_1_Inds]) / RFM[SD_1_Inds]))
+   824                                                   )
+   825                                                   + (
+   826     12824      11853.0      0.9      0.4              ((RFM[SD_1_Inds] - QFm[SD_1_Inds]) / RFM[SD_1_Inds])
+   827      6412      11506.0      1.8      0.4              * (-np.log((RFM[SD_1_Inds] - QFm[SD_1_Inds]) / RFM[SD_1_Inds]))
+   828                                                   )
+   829                                               )
+   830      6412      47378.0      7.4      1.6      SD1_Inds = np.where(SD == 1)[0]
+   831     12824     141988.0     11.1      4.9      Min_E[SD1_Inds] = (RFM[SD1_Inds] / Ts) * (
+   832      6412       8357.0      1.3      0.3          (
+   833     12824     129226.0     10.1      4.4              ((QFm[SD1_Inds] - Max_Overlap[SD1_Inds]) / RFM[SD1_Inds])
+   834      6412     220250.0     34.3      7.5              * (-np.log((QFm[SD1_Inds] - Max_Overlap[SD1_Inds]) / RFM[SD1_Inds]))
+   835                                                   )
+   836                                                   + (
+   837     12824     164356.0     12.8      5.6              ((RFM[SD1_Inds] - QFm[SD1_Inds] + Max_Overlap[SD1_Inds]) / RFM[SD1_Inds])
+   838                                                       * (
+   839     12824     100536.0      7.8      3.4                  -np.log(
+   840     12824     144713.0     11.3      5.0                      (RFM[SD1_Inds] - QFm[SD1_Inds] + Max_Overlap[SD1_Inds])
+   841      6412      32498.0      5.1      1.1                      / RFM[SD1_Inds]
+   842                                                           )
+   843                                                       )
+   844                                                   )
+   845                                               )
+   846      6412      25424.0      4.0      0.9      Min_E[np.isnan(Min_E)] = 0
+   847      6412      11313.0      1.8      0.4      Min_E[np.isnan(Min_E)] = 0
+   848                                               #
+   849      6412      21289.0      3.3      0.7      CE[np.isnan(CE)] = Min_E[np.isnan(CE)]
+   850      6412      17041.0      2.7      0.6      return CE, Ind_E, Min_E
+
+Total time: 14.6771 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: Calc_ESSs at line 484
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   484                                           @profile
+   485                                           def Calc_ESSs(
+   486                                               RFms,
+   487                                               QFms,
+   488                                               RFMs,
+   489                                               QFMs,
+   490                                               Max_Ent_Options,
+   491                                               Sample_Cardinality,
+   492                                               All_Overlaps_Options,
+   493                                               All_Use_Cases,
+   494                                               All_Used_Inds,
+   495                                           ):
+   496                                               """
+   497                                               Now that we have all of the values required for ES caclulations (RFms, QFms, RFMs, QFMs, Max_Ent_Options) and
+   498                                               have determined which ESE should be used for each pair of features (All_Overlaps_Options, All_Use_Cases, All_Used_Inds),
+   499                                               we may calculated the ES metrics for the FF against every other feature in adata.
+   500                                               """
+   501                                               ## Create variables to track caclulation outputs
+   502      6412      83053.0     13.0      0.6      All_ESSs = np.zeros((4, RFms.shape[0]))
+   503      6412      22489.0      3.5      0.2      All_D_EPs = np.zeros((4, RFms.shape[0]))
+   504      6412      32987.0      5.1      0.2      All_O_EPs = np.zeros((4, RFms.shape[0]))
+   505      6412      26852.0      4.2      0.2      All_SGs = np.zeros((4, RFms.shape[0]))
+   506      6412      29284.0      4.6      0.2      All_SWs = np.zeros((4, RFms.shape[0]))
+   507                                               ###################
+   508                                               ##### (1)  mm #####
+   509      6412        966.0      0.2      0.0      Use_Curve = 0
+   510                                               ## Find the FF/SF pairs where we should use ESE (1) to calculate entropies
+   511      6412      13993.0      2.2      0.1      Calc_Inds = All_Used_Inds[Use_Curve].astype("i")
+   512      6412       1656.0      0.3      0.0      if Calc_Inds.shape[0] > 0:
+   513                                                   # Retrieve the Max_Ent, Min_x, Max_X and observed overlap values
+   514      6412      80700.0     12.6      0.5          Min_Overlap = np.repeat(0, Calc_Inds.shape[0])
+   515      6412     235465.0     36.7      1.6          Max_Overlap = RFms[Calc_Inds]
+   516      6412      73208.0     11.4      0.5          Overlaps = All_Overlaps_Options[Use_Curve, Calc_Inds]
+   517      6412      66382.0     10.4      0.5          Max_Ent_x = Max_Ent_Options[Use_Curve, Calc_Inds]
+   518      6412      55932.0      8.7      0.4          Ind_X_1 = Max_Ent_x - Min_Overlap
+   519      6412      12024.0      1.9      0.1          Ind_X1 = Max_Overlap - Max_Ent_x
+   520                                                   #
+   521      6412      41304.0      6.4      0.3          SD_1_Inds = np.where(Overlaps < Max_Ent_x)[0]
+   522      6412      61830.0      9.6      0.4          SD1_Inds = np.where(Overlaps >= Max_Ent_x)[0]
+   523      6412      34159.0      5.3      0.2          SDs = np.zeros(Calc_Inds.shape[0]) - 1
+   524      6412      47766.0      7.4      0.3          SDs[SD1_Inds] = 1
+   525                                                   #
+   526      6412       9536.0      1.5      0.1          D = np.zeros(Calc_Inds.shape[0])
+   527      6412      10044.0      1.6      0.1          O = np.zeros(Calc_Inds.shape[0])
+   528      6412       4074.0      0.6      0.0          D[SD_1_Inds] = Overlaps[SD_1_Inds]
+   529      6412       1851.0      0.3      0.0          O[SD_1_Inds] = (
+   530     19236      20648.0      1.1      0.1              Sample_Cardinality
+   531      6412     141090.0     22.0      1.0              - (RFms[Calc_Inds][SD_1_Inds] + QFms[Calc_Inds][SD_1_Inds])
+   532      6412       2507.0      0.4      0.0              + Overlaps[SD_1_Inds]
+   533                                                   )
+   534      6412     213576.0     33.3      1.5          D[SD1_Inds] = RFms[Calc_Inds][SD1_Inds] - Overlaps[SD1_Inds]
+   535      6412     269624.0     42.0      1.8          O[SD1_Inds] = QFms[Calc_Inds][SD1_Inds] - Overlaps[SD1_Inds]
+   536                                                   # Perform caclulations with ESE (1)
+   537     12824    3073475.0    239.7     20.9          CE, Ind_E, Min_E = ESE1(
+   538      6412        752.0      0.1      0.0              Overlaps,
+   539      6412       1057.0      0.2      0.0              SDs,
+   540      6412      59362.0      9.3      0.4              RFms[Calc_Inds],
+   541      6412      59719.0      9.3      0.4              RFMs[Calc_Inds],
+   542      6412      56976.0      8.9      0.4              QFms[Calc_Inds],
+   543      6412      58989.0      9.2      0.4              QFMs[Calc_Inds],
+   544      6412        740.0      0.1      0.0              Sample_Cardinality,
+   545      6412        643.0      0.1      0.0              Max_Overlap,
+   546                                                   )
+   547                                                   #
+   548      6412      47357.0      7.4      0.3          SWs = (Ind_E - Min_E) / Ind_E
+   549      6412      63774.0      9.9      0.4          SGs = (Ind_E - CE) / (Ind_E - Min_E)
+   550                                                   # Because of float errors the following inequality at the boundary sometimes fails, (CE[Test] < Min_E[Test]), leading to values greater than 1. It is valid to just correct them to 1.
+   551      6412      22912.0      3.6      0.2          SGs[SGs > 1] = 1
+   552                                                   # Because of float errors the following inequality at the maximum sometimes fails, (CE[Test] > Ind_E[Test]), leading to values greater than less than 0. It is valid to just correct them to 0.
+   553      6412      30452.0      4.7      0.2          SGs[SGs < 0] = 0
+   554                                                   #
+   555      6412     166305.0     25.9      1.1          ESS = SWs * SGs * SDs * All_Use_Cases[Use_Curve, Calc_Inds]
+   556      6412      91841.0     14.3      0.6          All_ESSs[Use_Curve, Calc_Inds] = ESS
+   557      6412      80126.0     12.5      0.5          All_SWs[Use_Curve, Calc_Inds] = SWs
+   558      6412      81525.0     12.7      0.6          All_SGs[Use_Curve, Calc_Inds] = SGs
+   559                                                   #
+   560      6412       8501.0      1.3      0.1          SD_1_IndEnt = Ind_E[SD_1_Inds] / Ind_X_1[SD_1_Inds]
+   561      6412      77324.0     12.1      0.5          SD1_IndEnt = Ind_E[SD1_Inds] / Ind_X1[SD1_Inds]
+   562                                                   #
+   563      6412      24462.0      3.8      0.2          D_EPs = np.zeros(Ind_E.shape[0])
+   564      6412       3999.0      0.6      0.0          D_EPs[SD_1_Inds] = (
+   565      6412      10781.0      1.7      0.1              (CE[SD_1_Inds] - Min_E[SD_1_Inds]) / D[SD_1_Inds]
+   566      6412      21367.0      3.3      0.1          ) - SD_1_IndEnt
+   567      6412     327240.0     51.0      2.2          D_EPs[SD1_Inds] = ((CE[SD1_Inds] - Min_E[SD1_Inds]) / D[SD1_Inds]) - SD1_IndEnt
+   568                                                   #
+   569      6412       9428.0      1.5      0.1          O_EPs = np.zeros(Ind_E.shape[0])
+   570      6412       8290.0      1.3      0.1          O_EPs[SD_1_Inds] = ((CE[SD_1_Inds]) / O[SD_1_Inds]) - SD_1_IndEnt
+   571      6412     214337.0     33.4      1.5          O_EPs[SD1_Inds] = ((CE[SD1_Inds]) / O[SD1_Inds]) - SD1_IndEnt
+   572                                                   #
+   573      6412      86799.0     13.5      0.6          All_D_EPs[Use_Curve, Calc_Inds] = D_EPs
+   574      6412      84248.0     13.1      0.6          All_O_EPs[Use_Curve, Calc_Inds] = O_EPs
+   575                                                   #
+   576                                               ###################
+   577                                               ##### (2)  Mm #####
+   578      6412        910.0      0.1      0.0      Use_Curve = 1
+   579                                               ## Find the FF/SF pairs where we should use ESE (2) to calculate entropies
+   580      6412      10980.0      1.7      0.1      Calc_Inds = All_Used_Inds[Use_Curve].astype("i")
+   581      6412       2452.0      0.4      0.0      if Calc_Inds.shape[0] > 0:
+   582                                                   # Retrieve the Max_Ent, Min_x, Max_X and observed overlap values
+   583      6411      54073.0      8.4      0.4          Min_Overlap = np.repeat(0, Calc_Inds.shape[0])
+   584      6411      77731.0     12.1      0.5          Max_Overlap = np.minimum(RFms[Calc_Inds], QFMs[Calc_Inds])
+   585      6411      37780.0      5.9      0.3          Overlaps = All_Overlaps_Options[Use_Curve, Calc_Inds]
+   586      6411      34113.0      5.3      0.2          Max_Ent_x = Max_Ent_Options[Use_Curve, Calc_Inds]
+   587      6411      26879.0      4.2      0.2          Ind_X_1 = Max_Ent_x - Min_Overlap
+   588      6411       7639.0      1.2      0.1          Ind_X1 = Max_Overlap - Max_Ent_x
+   589                                                   #
+   590      6411      42201.0      6.6      0.3          SD_1_Inds = np.where(Overlaps < Max_Ent_x)[0]
+   591      6411      36080.0      5.6      0.2          SD1_Inds = np.where(Overlaps >= Max_Ent_x)[0]
+   592      6411      19869.0      3.1      0.1          SDs = np.zeros(Calc_Inds.shape[0]) - 1
+   593      6411      12951.0      2.0      0.1          SDs[SD1_Inds] = 1
+   594                                                   #
+   595      6411       7201.0      1.1      0.0          D = np.zeros(Calc_Inds.shape[0])
+   596      6411       7196.0      1.1      0.0          O = np.zeros(Calc_Inds.shape[0])
+   597      6411      41210.0      6.4      0.3          D[SD_1_Inds] = Overlaps[SD_1_Inds]
+   598      6411      14333.0      2.2      0.1          O[SD_1_Inds] = (
+   599     19233      68066.0      3.5      0.5              QFms[Calc_Inds][SD_1_Inds]
+   600      6411      40937.0      6.4      0.3              - RFms[Calc_Inds][SD_1_Inds]
+   601      6411      10420.0      1.6      0.1              + Overlaps[SD_1_Inds]
+   602                                                   )
+   603      6411      69190.0     10.8      0.5          D[SD1_Inds] = RFms[Calc_Inds][SD1_Inds] - Overlaps[SD1_Inds]
+   604      6411      12076.0      1.9      0.1          O[SD1_Inds] = (
+   605      6411      97082.0     15.1      0.7              QFMs[Calc_Inds][SD1_Inds] - RFms[Calc_Inds][SD1_Inds] + D[SD1_Inds]
+   606                                                   )
+   607                                                   # Perform caclulations with ESE (2)
+   608     12822    1665894.0    129.9     11.4          CE, Ind_E, Min_E = ESE2(
+   609      6411        670.0      0.1      0.0              Overlaps,
+   610      6411        639.0      0.1      0.0              SDs,
+   611      6411      30426.0      4.7      0.2              RFms[Calc_Inds],
+   612      6411      30763.0      4.8      0.2              RFMs[Calc_Inds],
+   613      6411      31052.0      4.8      0.2              QFms[Calc_Inds],
+   614      6411      29053.0      4.5      0.2              QFMs[Calc_Inds],
+   615      6411        783.0      0.1      0.0              Sample_Cardinality,
+   616                                                   )
+   617                                                   #
+   618      6411      31466.0      4.9      0.2          SWs = (Ind_E - Min_E) / Ind_E
+   619      6411      33904.0      5.3      0.2          SGs = (Ind_E - CE) / (Ind_E - Min_E)
+   620                                                   # Because of float errors the following inequality at the boundary sometimes fails, (CE[Test] < Min_E[Test]), leading to values greater than 1. It is valid to just correct them to 1.
+   621      6411      15107.0      2.4      0.1          SGs[SGs > 1] = 1
+   622                                                   # Because of float errors the following inequality at the maximum sometimes fails, (CE[Test] > Ind_E[Test]), leading to values greater than less than 0. It is valid to just correct them to 0.
+   623      6411      16318.0      2.5      0.1          SGs[SGs < 0] = 0
+   624                                                   #
+   625      6411      66928.0     10.4      0.5          ESS = SWs * SGs * SDs * All_Use_Cases[Use_Curve, Calc_Inds]
+   626      6411      52016.0      8.1      0.4          All_ESSs[Use_Curve, Calc_Inds] = ESS
+   627      6411      43070.0      6.7      0.3          All_SWs[Use_Curve, Calc_Inds] = SWs
+   628      6411      46499.0      7.3      0.3          All_SGs[Use_Curve, Calc_Inds] = SGs
+   629                                                   #
+   630      6411      35806.0      5.6      0.2          SD_1_IndEnt = Ind_E[SD_1_Inds] / Ind_X_1[SD_1_Inds]
+   631      6411      22317.0      3.5      0.2          SD1_IndEnt = Ind_E[SD1_Inds] / Ind_X1[SD1_Inds]
+   632                                                   #
+   633      6411       7563.0      1.2      0.1          D_EPs = np.zeros(Ind_E.shape[0])
+   634      6411      19638.0      3.1      0.1          D_EPs[SD_1_Inds] = (
+   635      6411      46774.0      7.3      0.3              (CE[SD_1_Inds] - Min_E[SD_1_Inds]) / D[SD_1_Inds]
+   636      6411       1211.0      0.2      0.0          ) - SD_1_IndEnt
+   637      6411      54830.0      8.6      0.4          D_EPs[SD1_Inds] = ((CE[SD1_Inds] - Min_E[SD1_Inds]) / D[SD1_Inds]) - SD1_IndEnt
+   638                                                   #
+   639      6411       7062.0      1.1      0.0          O_EPs = np.zeros(Ind_E.shape[0])
+   640      6411      46843.0      7.3      0.3          O_EPs[SD_1_Inds] = ((CE[SD_1_Inds]) / O[SD_1_Inds]) - SD_1_IndEnt
+   641      6411      41115.0      6.4      0.3          O_EPs[SD1_Inds] = ((CE[SD1_Inds]) / O[SD1_Inds]) - SD1_IndEnt
+   642                                                   #
+   643      6411      45470.0      7.1      0.3          All_D_EPs[Use_Curve, Calc_Inds] = D_EPs
+   644      6411      43255.0      6.7      0.3          All_O_EPs[Use_Curve, Calc_Inds] = O_EPs
+   645                                                   #
+   646                                               ###################
+   647                                               ##### (3)  mM #####
+   648      6412        805.0      0.1      0.0      Use_Curve = 2
+   649                                               ## Find the FF/SF pairs where we should use ESE (3) to calculate entropies
+   650      6412       9487.0      1.5      0.1      Calc_Inds = All_Used_Inds[Use_Curve].astype("i")
+   651      6412       2927.0      0.5      0.0      if Calc_Inds.shape[0] > 0:
+   652                                                   # Retrieve the Max_Ent, Min_x, Max_X and observed overlap values
+   653      6412      71952.0     11.2      0.5          Min_Overlap = RFMs[Calc_Inds] - QFMs[Calc_Inds]
+   654      6412      68792.0     10.7      0.5          Max_Overlap = np.minimum(QFms[Calc_Inds], RFMs[Calc_Inds])
+   655      6412      36296.0      5.7      0.2          Overlaps = All_Overlaps_Options[Use_Curve, Calc_Inds]
+   656      6412      36014.0      5.6      0.2          Max_Ent_x = Max_Ent_Options[Use_Curve, Calc_Inds]
+   657      6412       8295.0      1.3      0.1          Ind_X_1 = Max_Ent_x - Min_Overlap
+   658      6412       6851.0      1.1      0.0          Ind_X1 = Max_Overlap - Max_Ent_x
+   659                                                   #
+   660      6412      37692.0      5.9      0.3          SD_1_Inds = np.where(Overlaps < Max_Ent_x)[0]
+   661      6412      34706.0      5.4      0.2          SD1_Inds = np.where(Overlaps >= Max_Ent_x)[0]
+   662      6412      20727.0      3.2      0.1          SDs = np.zeros(Calc_Inds.shape[0]) - 1
+   663      6412      12682.0      2.0      0.1          SDs[SD1_Inds] = 1
+   664                                                   #
+   665      6412       7653.0      1.2      0.1          D = np.zeros(Calc_Inds.shape[0])
+   666      6412       6064.0      0.9      0.0          O = np.zeros(Calc_Inds.shape[0])
+   667      6412      16384.0      2.6      0.1          D[SD_1_Inds] = (
+   668     19236      76401.0      4.0      0.5              QFMs[Calc_Inds][SD_1_Inds]
+   669      6412      41350.0      6.4      0.3              - RFMs[Calc_Inds][SD_1_Inds]
+   670      6412      10817.0      1.7      0.1              + Overlaps[SD_1_Inds]
+   671                                                   )
+   672      6412      23930.0      3.7      0.2          O[SD_1_Inds] = Overlaps[SD_1_Inds]
+   673      6412      72837.0     11.4      0.5          D[SD1_Inds] = QFms[Calc_Inds][SD1_Inds] - Overlaps[SD1_Inds]
+   674      6412      66714.0     10.4      0.5          O[SD1_Inds] = RFMs[Calc_Inds][SD1_Inds] - Overlaps[SD1_Inds]
+   675                                                   # Perform caclulations with ESE (3)
+   676     12824    1610396.0    125.6     11.0          CE, Ind_E, Min_E = ESE3(
+   677      6412        789.0      0.1      0.0              Overlaps,
+   678      6412        609.0      0.1      0.0              SDs,
+   679      6412      30962.0      4.8      0.2              RFms[Calc_Inds],
+   680      6412      30442.0      4.7      0.2              RFMs[Calc_Inds],
+   681      6412      29866.0      4.7      0.2              QFms[Calc_Inds],
+   682      6412      30322.0      4.7      0.2              QFMs[Calc_Inds],
+   683      6412        723.0      0.1      0.0              Sample_Cardinality,
+   684      6412        667.0      0.1      0.0              Min_Overlap,
+   685                                                   )
+   686                                                   #
+   687      6412      30465.0      4.8      0.2          SWs = (Ind_E - Min_E) / Ind_E
+   688      6412      35041.0      5.5      0.2          SGs = (Ind_E - CE) / (Ind_E - Min_E)
+   689                                                   # Because of float errors the following inequality at the boundary sometimes fails, (CE[Test] < Min_E[Test]), leading to values greater than 1. It is valid to just correct them to 1.
+   690      6412      14031.0      2.2      0.1          SGs[SGs > 1] = 1
+   691                                                   # Because of float errors the following inequality at the maximum sometimes fails, (CE[Test] > Ind_E[Test]), leading to values greater than less than 0. It is valid to just correct them to 0.
+   692      6412      16250.0      2.5      0.1          SGs[SGs < 0] = 0
+   693                                                   #
+   694      6412      65010.0     10.1      0.4          ESS = SWs * SGs * SDs * All_Use_Cases[Use_Curve, Calc_Inds]
+   695      6412      44204.0      6.9      0.3          All_ESSs[Use_Curve, Calc_Inds] = ESS
+   696      6412      43835.0      6.8      0.3          All_SWs[Use_Curve, Calc_Inds] = SWs
+   697      6412      44756.0      7.0      0.3          All_SGs[Use_Curve, Calc_Inds] = SGs
+   698                                                   #
+   699      6412      27701.0      4.3      0.2          SD_1_IndEnt = Ind_E[SD_1_Inds] / Ind_X_1[SD_1_Inds]
+   700      6412      22013.0      3.4      0.1          SD1_IndEnt = Ind_E[SD1_Inds] / Ind_X1[SD1_Inds]
+   701                                                   #
+   702      6412       8442.0      1.3      0.1          D_EPs = np.zeros(Ind_E.shape[0])
+   703      6412      23652.0      3.7      0.2          D_EPs[SD_1_Inds] = (
+   704      6412      46086.0      7.2      0.3              (CE[SD_1_Inds] - Min_E[SD_1_Inds]) / D[SD_1_Inds]
+   705      6412       1061.0      0.2      0.0          ) - SD_1_IndEnt
+   706      6412      56414.0      8.8      0.4          D_EPs[SD1_Inds] = ((CE[SD1_Inds] - Min_E[SD1_Inds]) / D[SD1_Inds]) - SD1_IndEnt
+   707                                                   #
+   708      6412       7407.0      1.2      0.1          O_EPs = np.zeros(Ind_E.shape[0])
+   709      6412      50916.0      7.9      0.3          O_EPs[SD_1_Inds] = ((CE[SD_1_Inds]) / O[SD_1_Inds]) - SD_1_IndEnt
+   710      6412      45604.0      7.1      0.3          O_EPs[SD1_Inds] = ((CE[SD1_Inds]) / O[SD1_Inds]) - SD1_IndEnt
+   711                                                   #
+   712      6412      47729.0      7.4      0.3          All_D_EPs[Use_Curve, Calc_Inds] = D_EPs
+   713      6412      44628.0      7.0      0.3          All_O_EPs[Use_Curve, Calc_Inds] = O_EPs
+   714                                                   #
+   715                                               ###################
+   716                                               ##### (4)  MM #####
+   717      6412        933.0      0.1      0.0      Use_Curve = 3
+   718                                               ## Find the FF/SF pairs where we should use ESE (4) to calculate entropies
+   719      6412       5207.0      0.8      0.0      Calc_Inds = All_Used_Inds[Use_Curve].astype("i")
+   720      6412      36890.0      5.8      0.3      if Calc_Inds.shape[0] > 0:
+   721                                                   # Retrieve the Max_Ent, Min_x, Max_X and observed overlap values
+   722                                                   Min_Overlap = QFMs[Calc_Inds] - RFms[Calc_Inds]
+   723                                                   Max_Overlap = np.minimum(QFMs[Calc_Inds], RFMs[Calc_Inds])
+   724                                                   Overlaps = All_Overlaps_Options[Use_Curve, Calc_Inds]
+   725                                                   Max_Ent_x = Max_Ent_Options[Use_Curve, Calc_Inds]
+   726                                                   Ind_X_1 = Max_Ent_x - Min_Overlap
+   727                                                   Ind_X1 = Max_Overlap - Max_Ent_x
+   728                                                   #
+   729                                                   SD_1_Inds = np.where(Overlaps < Max_Ent_x)[0]
+   730                                                   # NOTE: USE ~
+   731                                                   SD1_Inds = np.where(Overlaps >= Max_Ent_x)[0]
+   732                                                   SDs = np.zeros(Calc_Inds.shape[0]) - 1
+   733                                                   SDs[SD1_Inds] = 1
+   734                                                   #
+   735                                                   D = np.zeros(Calc_Inds.shape[0])
+   736                                                   O = np.zeros(Calc_Inds.shape[0])
+   737                                                   D[SD_1_Inds] = Overlaps[SD_1_Inds] - (
+   738                                                       Sample_Cardinality
+   739                                                       - (QFms[Calc_Inds][SD_1_Inds] + RFms[Calc_Inds][SD_1_Inds])
+   740                                                   )
+   741                                                   O[SD_1_Inds] = Overlaps[SD_1_Inds]
+   742                                                   D[SD1_Inds] = QFMs[Calc_Inds][SD1_Inds] - Overlaps[SD1_Inds]
+   743                                                   O[SD1_Inds] = (
+   744                                                       RFMs[Calc_Inds][SD1_Inds] - QFMs[Calc_Inds][SD1_Inds] + D[SD1_Inds]
+   745                                                   )
+   746                                                   # Perform caclulations with ESE (4)
+   747                                                   CE, Ind_E, Min_E = ESE4(
+   748                                                       Overlaps,
+   749                                                       SDs,
+   750                                                       RFms[Calc_Inds],
+   751                                                       RFMs[Calc_Inds],
+   752                                                       QFms[Calc_Inds],
+   753                                                       QFMs[Calc_Inds],
+   754                                                       Sample_Cardinality,
+   755                                                       Min_Overlap,
+   756                                                       Max_Overlap,
+   757                                                   )
+   758                                                   #
+   759                                                   SWs = (Ind_E - Min_E) / Ind_E
+   760                                                   SGs = (Ind_E - CE) / (Ind_E - Min_E)
+   761                                                   # Because of float errors the following inequality at the boundary sometimes fails, (CE[Test] < Min_E[Test]), leading to values greater than 1. It is valid to just correct them to 1.
+   762                                                   # NOTE: USE NP.CLIP
+   763                                                   SGs[SGs > 1] = 1
+   764                                                   # Because of float errors the following inequality at the maximum sometimes fails, (CE[Test] > Ind_E[Test]), leading to values greater than less than 0. It is valid to just correct them to 0.
+   765                                                   SGs[SGs < 0] = 0
+   766                                                   #
+   767                                                   ESS = SWs * SGs * SDs * All_Use_Cases[Use_Curve, Calc_Inds]
+   768                                                   All_ESSs[Use_Curve, Calc_Inds] = ESS
+   769                                                   All_SWs[Use_Curve, Calc_Inds] = SWs
+   770                                                   All_SGs[Use_Curve, Calc_Inds] = SGs
+   771                                                   #
+   772                                                   SD_1_IndEnt = Ind_E[SD_1_Inds] / Ind_X_1[SD_1_Inds]
+   773                                                   SD1_IndEnt = Ind_E[SD1_Inds] / Ind_X1[SD1_Inds]
+   774                                                   #
+   775                                                   D_EPs = np.zeros(Ind_E.shape[0])
+   776                                                   D_EPs[SD_1_Inds] = (
+   777                                                       (CE[SD_1_Inds] - Min_E[SD_1_Inds]) / D[SD_1_Inds]
+   778                                                   ) - SD_1_IndEnt
+   779                                                   D_EPs[SD1_Inds] = ((CE[SD1_Inds] - Min_E[SD1_Inds]) / D[SD1_Inds]) - SD1_IndEnt
+   780                                                   #
+   781                                                   O_EPs = np.zeros(Ind_E.shape[0])
+   782                                                   O_EPs[SD_1_Inds] = ((CE[SD_1_Inds]) / O[SD_1_Inds]) - SD_1_IndEnt
+   783                                                   O_EPs[SD1_Inds] = ((CE[SD1_Inds]) / O[SD1_Inds]) - SD1_IndEnt
+   784                                                   #
+   785                                                   All_D_EPs[Use_Curve, Calc_Inds] = D_EPs
+   786                                                   All_O_EPs[Use_Curve, Calc_Inds] = O_EPs
+   787                                                   #
+   788                                               ########
+   789                                               ## For each feature pair, accept the orientation with the maximum ESS as it is the least likely to have occoured by chance.
+   790      6412     883748.0    137.8      6.0      Max_ESS_Inds = np.nanargmax(np.absolute(All_ESSs), axis=0)
+   791                                               ## Return results
+   792      6412      22992.0      3.6      0.2      return (
+   793      6412     252390.0     39.4      1.7          All_ESSs[Max_ESS_Inds, np.arange(RFms.shape[0])],
+   794      6412     215078.0     33.5      1.5          All_D_EPs[Max_ESS_Inds, np.arange(RFms.shape[0])],
+   795      6412     211503.0     33.0      1.4          All_O_EPs[Max_ESS_Inds, np.arange(RFms.shape[0])],
+   796      6412     211102.0     32.9      1.4          All_SWs[Max_ESS_Inds, np.arange(RFms.shape[0])],
+   797      6412     194235.0     30.3      1.3          All_SGs[Max_ESS_Inds, np.arange(RFms.shape[0])],
+   798                                               )
+
+Total time: 60.3815 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: Get_Overlap_Info at line 324
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   324                                           @profile
+   325                                           def Get_Overlap_Info(
+   326                                               Fixed_Feature,
+   327                                               Fixed_Feature_Cardinality,
+   328                                               Sample_Cardinality,
+   329                                               Feature_Sums,
+   330                                               FF_QF_Vs_RF,
+   331                                           ):
+   332                                               """
+   333                                               For any pair of features the ES mathematical framework has a set of logical rules regarding how the ES metrics
+   334                                               should be calcualted. These logical rules dictate which of the two features is the reference feature (RF) or query feature
+   335                                               (QF) and which of the 4 Entropy Sort Equations (ESE 1-4) should be used (Add reference to supplemental figure of
+   336                                               new manuscript when ready).
+   337                                               """
+   338                                               ## Set up an array to track which of ESE equations 1-4 the recorded observed overlap relates to (row), and if it is
+   339                                               # native correlation (1) or flipped anti-correlation (-1). Row 1 = mm, row 2 = Mm, row 3 = mM, row 4 = MM.
+   340      6412      17012.0      2.7      0.0      All_Use_Cases = np.zeros((4, Feature_Sums.shape[0]))
+   341                                               ## Set up an array to track the observed overlaps between the FF and the secondary features.
+   342      6412      24686.0      3.8      0.0      All_Overlaps_Options = np.zeros((4, Feature_Sums.shape[0]))
+   343                                               ## Set up a list to track the used inds/features for each ESE
+   344      6412       4144.0      0.6      0.0      All_Used_Inds = [[]] * 4
+   345                                               ####
+   346                                               ## Pairwise calculate total overlaps of FF values with the values every other a feature in adata
+   347      6412      30585.0      4.8      0.1      Non_Zero_Inds = np.where(Fixed_Feature != 0)[0]
+   348      6412   16808847.0   2621.5     27.8      Sub_Global_Scaled_Matrix = Global_Scaled_Matrix[Non_Zero_Inds, :]
+   349     12824     432236.0     33.7      0.7      B = csc_matrix(
+   350      6412       1025.0      0.2      0.0          (
+   351      6412    3145257.0    490.5      5.2              Fixed_Feature[Non_Zero_Inds].T[0][Sub_Global_Scaled_Matrix.indices],
+   352      6412       1248.0      0.2      0.0              Sub_Global_Scaled_Matrix.indices,
+   353      6412        788.0      0.1      0.0              Sub_Global_Scaled_Matrix.indptr,
+   354                                                   )
+   355                                               )
+   356      6412    8155403.0   1271.9     13.5      Overlaps = Sub_Global_Scaled_Matrix.minimum(B).sum(axis=0).A[0]
+   357                                               ## Pairwise calculate total overlaps of Inverse FF values with the values every other a feature in adata
+   358      6412      19414.0      3.0      0.0      Inverse_Fixed_Feature = 1 - Fixed_Feature  # np.max(Fixed_Feature) - Fixed_Feature
+   359      6412     115590.0     18.0      0.2      Non_Zero_Inds = np.where(Inverse_Fixed_Feature != 0)[0]
+   360      6412   10919618.0   1703.0     18.1      Sub_Global_Scaled_Matrix = Global_Scaled_Matrix[Non_Zero_Inds, :]
+   361     12824     813651.0     63.4      1.3      B = csc_matrix(
+   362      6412       1114.0      0.2      0.0          (
+   363      6412    5615950.0    875.8      9.3              Inverse_Fixed_Feature[Non_Zero_Inds].T[0][Sub_Global_Scaled_Matrix.indices],
+   364      6412       1587.0      0.2      0.0              Sub_Global_Scaled_Matrix.indices,
+   365      6412        869.0      0.1      0.0              Sub_Global_Scaled_Matrix.indptr,
+   366                                                   )
+   367                                               )
+   368      6412   12896563.0   2011.3     21.4      Inverse_Overlaps = Sub_Global_Scaled_Matrix.minimum(B).sum(axis=0).A[0]
+   369                                               ####
+   370                                               ### Using the logical rules of ES to work out which ESE should be used for each pair of features beign compared.
+   371                                               ## If FF is observed in it's minority state, use the following 4 steps to caclulate overlaps with every other feature
+   372      6412      30898.0      4.8      0.1      if Fixed_Feature_Cardinality < (Sample_Cardinality / 2):
+   373                                                   #######
+   374                                                   ## FF and other feature are minority states & FF is QF
+   375     19236      52853.0      2.7      0.1          Calc_Inds = np.where(
+   376      6412      66210.0     10.3      0.1              (Feature_Sums < (Sample_Cardinality / 2)) & (FF_QF_Vs_RF == 1)
+   377      6412       1060.0      0.2      0.0          )[0]
+   378                                                   ## Track which features are observed as mm (row 1), and which are mM when the secondary feature is flipped (row 3)
+   379      6412     200664.0     31.3      0.3          All_Use_Cases[:, Calc_Inds] = np.array([1, -1, 0, 0]).reshape(4, 1)
+   380                                                   ## Calcualte the overlaps as the sum of minimums between samples, using Global_Scaled_Matrix for natural observations
+   381                                                   # and Global_Scaled_Matrix_Inverse for inverse observations.
+   382      6412     107627.0     16.8      0.2          All_Overlaps_Options[0, Calc_Inds] = Overlaps[Calc_Inds]  # Overlaps_mm
+   383      6412      71371.0     11.1      0.1          All_Used_Inds[0] = np.append(All_Used_Inds[0], Calc_Inds)
+   384      6412      73416.0     11.4      0.1          All_Overlaps_Options[1, Calc_Inds] = Inverse_Overlaps[Calc_Inds]  # Overlaps_Mm
+   385      6412      26388.0      4.1      0.0          All_Used_Inds[1] = np.append(All_Used_Inds[1], Calc_Inds)
+   386                                                   #######
+   387                                                   ## FF and other feature are minority states & FF is RF
+   388     19236      44805.0      2.3      0.1          Calc_Inds = np.where(
+   389      6412      36161.0      5.6      0.1              (Feature_Sums < (Sample_Cardinality / 2)) & (FF_QF_Vs_RF == 0)
+   390      6412        883.0      0.1      0.0          )[0]
+   391                                                   ## Track which features are observed as mm (row 1), and which are Mm when the secondary feature is flipped (row 2)
+   392      6412     174195.0     27.2      0.3          All_Use_Cases[:, Calc_Inds] = np.array([1, 0, -1, 0]).reshape(4, 1)
+   393                                                   ## Calcualte the overlaps as the sum of minimums between samples, using Global_Scaled_Matrix for natural observations
+   394                                                   # and Global_Scaled_Matrix_Inverse for inverse observations.
+   395      6412      86811.0     13.5      0.1          All_Overlaps_Options[0, Calc_Inds] = Overlaps[Calc_Inds]  # Overlaps_mm
+   396      6412      32456.0      5.1      0.1          All_Used_Inds[0] = np.append(All_Used_Inds[0], Calc_Inds)
+   397      6412      79860.0     12.5      0.1          All_Overlaps_Options[2, Calc_Inds] = Inverse_Overlaps[Calc_Inds]  # Overlaps_mM
+   398      6412      29647.0      4.6      0.0          All_Used_Inds[2] = np.append(All_Used_Inds[2], Calc_Inds)
+   399                                                   #######
+   400                                                   ## FF is minority, other feature is majority & FF is QF
+   401     19236      19164.0      1.0      0.0          Calc_Inds = np.where(
+   402      6412      34846.0      5.4      0.1              (Feature_Sums >= (Sample_Cardinality / 2)) & (FF_QF_Vs_RF == 1)
+   403      6412        764.0      0.1      0.0          )[0]
+   404                                                   ## Track which features are observed as mM (row 4), and which are mm when the secondary feature is flipped (row 1)
+   405      6412      14667.0      2.3      0.0          All_Use_Cases[:, Calc_Inds] = np.array([0, 0, 1, -1]).reshape(4, 1)
+   406                                                   ## Calcualte the overlaps as the sum of minimums between samples, using Global_Scaled_Matrix for natural observations
+   407                                                   # and Global_Scaled_Matrix_Inverse for inverse observations.
+   408      6412       7713.0      1.2      0.0          All_Overlaps_Options[3, Calc_Inds] = Inverse_Overlaps[Calc_Inds]  # Overlaps_MM
+   409      6412      20682.0      3.2      0.0          All_Used_Inds[3] = np.append(All_Used_Inds[3], Calc_Inds)
+   410      6412       6059.0      0.9      0.0          All_Overlaps_Options[2, Calc_Inds] = Overlaps[Calc_Inds]  # Overlaps_mM
+   411      6412      21586.0      3.4      0.0          All_Used_Inds[2] = np.append(All_Used_Inds[2], Calc_Inds)
+   412                                                   #######
+   413                                                   ## FF is minority, other feature is majority & FF is RF
+   414     19236      12276.0      0.6      0.0          Calc_Inds = np.where(
+   415      6412      29140.0      4.5      0.0              (Feature_Sums >= (Sample_Cardinality / 2)) & (FF_QF_Vs_RF == 0)
+   416      6412        736.0      0.1      0.0          )[0]
+   417                                                   ## Track which features are observed as Mm (row 2), and which are mm when the secondary feature is flipped (row 1)
+   418      6412      12153.0      1.9      0.0          All_Use_Cases[:, Calc_Inds] = np.array([0, 1, 0, -1]).reshape(4, 1)
+   419                                                   ## Calcualte the overlaps as the sum of minimums between samples, using Global_Scaled_Matrix for natural observations
+   420                                                   # and Global_Scaled_Matrix_Inverse for inverse observations.
+   421      6412       6263.0      1.0      0.0          All_Overlaps_Options[3, Calc_Inds] = Inverse_Overlaps[Calc_Inds]  # Overlaps_MM
+   422      6412      17547.0      2.7      0.0          All_Used_Inds[3] = np.append(All_Used_Inds[3], Calc_Inds)
+   423      6412       6275.0      1.0      0.0          All_Overlaps_Options[1, Calc_Inds] = Overlaps[Calc_Inds]  # Overlaps_Mm
+   424      6412      19443.0      3.0      0.0          All_Used_Inds[1] = np.append(All_Used_Inds[1], Calc_Inds)
+   425                                                   #
+   426                                               ## If FF is observed in it's majority state, use the following 4 steps to caclulate overlaps with every other feature
+   427      6412      13627.0      2.1      0.0      if Fixed_Feature_Cardinality >= (Sample_Cardinality / 2):
+   428                                                   #######
+   429                                                   ## FF is majority, other feature is minority & FF is QF
+   430                                                   Calc_Inds = np.where(
+   431                                                       (Feature_Sums < (Sample_Cardinality / 2)) & (FF_QF_Vs_RF == 1)
+   432                                                   )[0]
+   433                                                   ## Track which features are observed as Mm (row 2), and which are MM when the secondary feature is flipped (row 4)
+   434                                                   All_Use_Cases[:, Calc_Inds] = np.array([-1, 1, 0, 0]).reshape(4, 1)
+   435                                                   ## Calcualte the overlaps as the sum of minimums between samples, using Global_Scaled_Matrix for natural observations
+   436                                                   # and Global_Scaled_Matrix_Inverse for inverse observations.
+   437                                                   All_Overlaps_Options[1, Calc_Inds] = Overlaps[Calc_Inds]  # Overlaps_Mm
+   438                                                   All_Used_Inds[1] = np.append(All_Used_Inds[1], Calc_Inds)
+   439                                                   All_Overlaps_Options[0, Calc_Inds] = Inverse_Overlaps[Calc_Inds]  # Overlaps_mm
+   440                                                   All_Used_Inds[0] = np.append(All_Used_Inds[0], Calc_Inds)
+   441                                                   #######
+   442                                                   ## FF is majority, other feature is minority & FF is RF
+   443                                                   Calc_Inds = np.where(
+   444                                                       (Feature_Sums < (Sample_Cardinality / 2)) & (FF_QF_Vs_RF == 0)
+   445                                                   )[0]
+   446                                                   ## Track which features are observed as mM (row 3), and which are MM when the secondary feature is flipped (row 4)
+   447                                                   All_Use_Cases[:, Calc_Inds] = np.array([-1, 0, 1, 0]).reshape(4, 1)
+   448                                                   ## Calcualte the overlaps as the sum of minimums between samples, using Global_Scaled_Matrix for natural observations
+   449                                                   # and Global_Scaled_Matrix_Inverse for inverse observations.
+   450                                                   All_Overlaps_Options[2, Calc_Inds] = Overlaps[Calc_Inds]  # Overlaps_mM
+   451                                                   All_Used_Inds[2] = np.append(All_Used_Inds[2], Calc_Inds)
+   452                                                   All_Overlaps_Options[0, Calc_Inds] = Inverse_Overlaps[Calc_Inds]  # Overlaps_mm
+   453                                                   All_Used_Inds[0] = np.append(All_Used_Inds[0], Calc_Inds)
+   454                                                   #######
+   455                                                   ## FF is majority, other feature is majority & FF is QF
+   456                                                   Calc_Inds = np.where(
+   457                                                       (Feature_Sums >= (Sample_Cardinality / 2)) & (FF_QF_Vs_RF == 1)
+   458                                                   )[0]
+   459                                                   ## Track which features are observed as MM (row 4), and which are Mm when the secondary feature is flipped (row 2)
+   460                                                   All_Use_Cases[:, Calc_Inds] = np.array([0, 0, -1, 1]).reshape(4, 1)
+   461                                                   ## Calcualte the overlaps as the sum of minimums between samples, using Global_Scaled_Matrix for natural observations
+   462                                                   # and Global_Scaled_Matrix_Inverse for inverse observations.
+   463                                                   All_Overlaps_Options[2, Calc_Inds] = Inverse_Overlaps[Calc_Inds]  # Overlaps_mM
+   464                                                   All_Used_Inds[2] = np.append(All_Used_Inds[2], Calc_Inds)
+   465                                                   All_Overlaps_Options[3, Calc_Inds] = Overlaps[Calc_Inds]  # Overlaps_MM
+   466                                                   All_Used_Inds[3] = np.append(All_Used_Inds[3], Calc_Inds)
+   467                                                   #######
+   468                                                   ## FF is majority, other feature is majority & FF is RF
+   469                                                   Calc_Inds = np.where(
+   470                                                       (Feature_Sums >= (Sample_Cardinality / 2)) & (FF_QF_Vs_RF == 0)
+   471                                                   )[0]
+   472                                                   ## Track which features are observed as MM (row 4), and which are mM when the secondary feature is flipped (row 3)
+   473                                                   All_Use_Cases[:, Calc_Inds] = np.array([0, -1, 0, 1]).reshape(4, 1)
+   474                                                   ## Calcualte the overlaps as the sum of minimums between samples, using Global_Scaled_Matrix for natural observations
+   475                                                   # and Global_Scaled_Matrix_Inverse for inverse observations.
+   476                                                   All_Overlaps_Options[1, Calc_Inds] = Inverse_Overlaps[Calc_Inds]  # Overlaps_Mm
+   477                                                   All_Used_Inds[1] = np.append(All_Used_Inds[1], Calc_Inds)
+   478                                                   All_Overlaps_Options[3, Calc_Inds] = Overlaps[Calc_Inds]  # Overlaps_MM
+   479                                                   All_Used_Inds[3] = np.append(All_Used_Inds[3], Calc_Inds)
+   480                                                   #
+   481      6412      17682.0      2.8      0.0      return All_Use_Cases, All_Overlaps_Options, All_Used_Inds
+
+Total time: 78.0539 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: Calc_ES_Metrics at line 259
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+   259                                           @profile
+   260                                           def Calc_ES_Metrics(Feature_Ind, Sample_Cardinality, Feature_Sums, Minority_States):
+   261                                               """
+   262                                               This function calcualtes the ES metrics for one of the features in the Secondary_Features object against
+   263                                               every variable/feature in the adata object.
+   264                                           
+   265                                               Feature_Ind - Indicates the column of Secondary_Features being used.
+   266                                               Sample_Cardinality - Inherited scalar of the number of samples in adata.
+   267                                               Feature_Sums - Inherited vector of the columns sums of adata.
+   268                                               Minority_States - Inherited vector of the minority state sums of each column of adata.
+   269                                               """
+   270                                               ## Extract the Fixed Feature (FF)
+   271      6412    1056044.0    164.7      1.4      Fixed_Feature = Secondary_Features[:, Feature_Ind].A
+   272      6412      52060.0      8.1      0.1      Fixed_Feature_Cardinality = np.sum(Fixed_Feature)
+   273      6412        885.0      0.1      0.0      Fixed_Feature_Minority_State = Fixed_Feature_Cardinality
+   274      6412      13928.0      2.2      0.0      if Fixed_Feature_Minority_State >= (Sample_Cardinality / 2):
+   275                                                   Fixed_Feature_Minority_State = Sample_Cardinality - Fixed_Feature_Minority_State
+   276                                               ## Identify where FF is the QF or RF
+   277      6412       7473.0      1.2      0.0      FF_QF_Vs_RF = np.zeros(Feature_Sums.shape[0])
+   278      6412      87204.0     13.6      0.1      FF_QF_Vs_RF[np.where(Fixed_Feature_Minority_State > Minority_States)[0]] = (
+   279      6412        782.0      0.1      0.0          1  # 1's mean FF is QF
+   280                                               )
+   281                                               ## Caclulate the QFms, RFms, RFMs and QFMs for each FF and secondary feature pair
+   282      6412       7616.0      1.2      0.0      RFms = Minority_States.copy()
+   283      6412      48211.0      7.5      0.1      Switch = np.where(FF_QF_Vs_RF == 0)[0]
+   284      6412      25439.0      4.0      0.0      RFms[Switch] = Fixed_Feature_Minority_State
+   285      6412      23168.0      3.6      0.0      RFMs = Sample_Cardinality - RFms
+   286      6412       7696.0      1.2      0.0      QFms = Minority_States.copy()
+   287      6412      49756.0      7.8      0.1      Switch = np.where(FF_QF_Vs_RF == 1)[0]
+   288      6412      25270.0      3.9      0.0      QFms[Switch] = Fixed_Feature_Minority_State
+   289      6412      15553.0      2.4      0.0      QFMs = Sample_Cardinality - QFms
+   290                                               ## Calculate the values of (x) that correspond to the maximum for each overlap scenario (mm, Mm, mM and MM) (m = minority, M = majority)
+   291      6412      31357.0      4.9      0.0      Max_Ent_x_mm = (RFms * QFms) / (RFms + RFMs)
+   292      6412      25035.0      3.9      0.0      Max_Ent_x_Mm = (QFMs * RFms) / (RFms + RFMs)
+   293      6412      25647.0      4.0      0.0      Max_Ent_x_mM = (RFMs * QFms) / (RFms + RFMs)
+   294      6412      26476.0      4.1      0.0      Max_Ent_x_MM = (RFMs * QFMs) / (RFms + RFMs)
+   295      6412      27243.0      4.2      0.0      Max_Ent_Options = np.array([Max_Ent_x_mm, Max_Ent_x_Mm, Max_Ent_x_mM, Max_Ent_x_MM])
+   296                                               ######
+   297                                               ## Caclulate the overlap between the FF states and the secondary features, using the correct ESE (1-4)
+   298     12824   61103026.0   4764.7     78.3      All_Use_Cases, All_Overlaps_Options, All_Used_Inds = Get_Overlap_Info(
+   299      6412        781.0      0.1      0.0          Fixed_Feature,
+   300      6412        670.0      0.1      0.0          Fixed_Feature_Cardinality,
+   301      6412        646.0      0.1      0.0          Sample_Cardinality,
+   302      6412        672.0      0.1      0.0          Feature_Sums,
+   303      6412        489.0      0.1      0.0          FF_QF_Vs_RF,
+   304                                               )
+   305                                               ## Having extracted the overlaps and their respective ESEs (1-4), calcualte the ESS and EPs
+   306     12824   15074877.0   1175.5     19.3      ESSs, D_EPs, O_EPs, SWs, SGs = Calc_ESSs(
+   307      6412       4375.0      0.7      0.0          RFms,
+   308      6412        851.0      0.1      0.0          QFms,
+   309      6412       1656.0      0.3      0.0          RFMs,
+   310      6412       1160.0      0.2      0.0          QFMs,
+   311      6412       1269.0      0.2      0.0          Max_Ent_Options,
+   312      6412        627.0      0.1      0.0          Sample_Cardinality,
+   313      6412        995.0      0.2      0.0          All_Overlaps_Options,
+   314      6412        672.0      0.1      0.0          All_Use_Cases,
+   315      6412        539.0      0.1      0.0          All_Used_Inds,
+   316                                               )
+   317      6412      30151.0      4.7      0.0      Identical_Features = np.where(ESSs == 1)[0]
+   318      6412       3617.0      0.6      0.0      D_EPs[Identical_Features] = 0
+   319      6412       2978.0      0.5      0.0      O_EPs[Identical_Features] = 0
+   320      6412     258275.0     40.3      0.3      EPs = nanmaximum(D_EPs, O_EPs)
+   321      6412       8714.0      1.4      0.0      return ESSs, EPs, SWs, SGs
+
+Total time: 82.1207 s
+File: /Users/shandc/Documents/ESFS/ESFS/ESFS.py
+Function: Parallel_Calc_ES_Matricies at line 75
+
+Line #      Hits         Time  Per Hit   % Time  Line Contents
+==============================================================
+    75                                           @profile
+    76                                           def Parallel_Calc_ES_Matricies(
+    77                                               adata,
+    78                                               Secondary_Features_Label="Self",
+    79                                               save_matrices=np.array(["ESSs", "EPs"]),
+    80                                               Use_Cores=-1,
+    81                                           ):
+    82                                               """
+    83                                               Using the Entropy Sorting (ES) mathematical framework, we may caclulate the ESS, EP, SW and SG correlation metrics
+    84                                               outlined in Radley et al. 2023.
+    85                                           
+    86                                               This function assumes that the user aims has a set of input features (Secondary_Features_Label) that will be used to pairwise calculate ES metrics
+    87                                               against each variable (column) of the provided anndata object. When Secondary_Features_Label is left blank, it defaults
+    88                                               to "Self" meaning ES metrics will be calcualted pairwise between all of the variables in adata. If Secondary_Features_Label
+    89                                               is not "Self", the user must point the algorithm to an attribute of adata that contains an array with the same number of samples
+    90                                               as adata and a set of secondary features (columns).
+    91                                           
+    92                                               save_matrices disctates which ES metrics will be written to the outputted adata object. The options are "ESSs", "EPs", "SGs", "SWs".
+    93                                           
+    94                                               Use_Cores defines how many CPU cores to use. Is Use_Cores = -1, the software will use N-1 the number of cores available on the machine.
+    95                                               """
+    96                                               ## Establish which Secondary_Features will be compared against each of the features in adata
+    97                                               global Secondary_Features
+    98         1          1.0      1.0      0.0      if Secondary_Features_Label == "Self":
+    99         1       1146.0   1146.0      0.0          Secondary_Features = adata.layers["Scaled_Counts"].copy()
+   100                                               else:
+   101                                                   print(
+   102                                                       "You have provided a 'Secondary_Features_Label', implying that in the anndata object there is a corresponding csc_sparse martix object with rows as samples and columns as features. Each feature will be used to calculate ES scores for each of the variables of the adata object"
+   103                                                   )
+   104                                                   Secondary_Features = adata.obsm[Secondary_Features_Label]
+   105                                               #
+   106                                               ## Create the global Global_Scaled_Matrix array for faster parallel computing calculations
+   107                                               global Global_Scaled_Matrix
+   108         1         20.0     20.0      0.0      Global_Scaled_Matrix = adata.layers["Scaled_Counts"]
+   109                                               ## Extract sample and feature cardinality
+   110         1          1.0      1.0      0.0      Sample_Cardinality = Global_Scaled_Matrix.shape[0]
+   111                                               ## Calculate feature sums and minority states for each adata feature
+   112         1        418.0    418.0      0.0      Feature_Sums = Global_Scaled_Matrix.sum(axis=0).A[0]
+   113         1          1.0      1.0      0.0      Minority_States = Feature_Sums.copy()
+   114         1         10.0     10.0      0.0      Switch = np.where(Minority_States >= (Sample_Cardinality / 2))[0]
+   115         1          4.0      4.0      0.0      Minority_States[Switch] = Sample_Cardinality - Minority_States[Switch]
+   116                                               ####
+   117                                               ## Provide indicies for parallel computing.
+   118         1          4.0      4.0      0.0      Feature_Inds = np.arange(Secondary_Features.shape[1])
+   119                                               ## Identify number of cores to use.
+   120         1          9.0      9.0      0.0      Cores_Available = multiprocess.cpu_count()
+   121         1          9.0      9.0      0.0      print("Cores Available: " + str(Cores_Available))
+   122         1          0.0      0.0      0.0      if Use_Cores == -1:
+   123                                                   Use_Cores = (
+   124                                                       Cores_Available - 1
+   125                                                   )  # -1 Is an arbitrary buffer of idle cores that I set.
+   126                                                   if Use_Cores < 1:
+   127                                                       Use_Cores = 1
+   128         1          2.0      2.0      0.0      print("Cores Used: " + str(Use_Cores))
+   129                                               ## Perform calculations
+   130         1          1.0      1.0      0.0      print("Calculating ESS and EP matricies.")
+   131         2          2.0      1.0      0.0      print(
+   132         1          0.0      0.0      0.0          "If progress bar freezes consider increasing system memory or reducing number of cores used with the 'Use_Cores' parameter as you may have hit a memory ceiling for your machine."
+   133                                               )
+   134                                               # if __name__ == '__main__':
+   135                                               ## Parallel compute
+   136         2         83.0     41.5      0.0      with np.errstate(divide="ignore", invalid="ignore"):
+   137         1          0.0      0.0      0.0          if Use_Cores == 1:
+   138                                                       # If only one core is used, use the standard map function
+   139         2   78391208.0    4e+07     95.5              Results = list(
+   140         2          1.0      0.5      0.0                  map(
+   141         2          1.0      0.5      0.0                      partial(
+   142         1          0.0      0.0      0.0                          Calc_ES_Metrics,
+   143         1          0.0      0.0      0.0                          Sample_Cardinality=Sample_Cardinality,
+   144         1          0.0      0.0      0.0                          Feature_Sums=Feature_Sums,
+   145         1          0.0      0.0      0.0                          Minority_States=Minority_States,
+   146                                                               ),
+   147         1          0.0      0.0      0.0                      Feature_Inds,
+   148                                                           )
+   149                                                       )
+   150                                                   else:
+   151                                                       Results = p_map(
+   152                                                           partial(
+   153                                                               Calc_ES_Metrics,
+   154                                                               Sample_Cardinality=Sample_Cardinality,
+   155                                                               Feature_Sums=Feature_Sums,
+   156                                                               Minority_States=Minority_States,
+   157                                                           ),
+   158                                                           Feature_Inds,
+   159                                                           num_cpus=Use_Cores,
+   160                                                       )
+   161                                               ## Unpack results
+   162         1    1494407.0    1e+06      1.8      Results = np.asarray(Results)
+   163                                               ## Save outputs requested by the save_matrices paramater
+   164         1        505.0    505.0      0.0      if np.isin("ESSs", save_matrices):
+   165         1          3.0      3.0      0.0          ESSs = Results[:, 0, :]
+   166                                                   if (
+   167         1          3.0      3.0      0.0              Secondary_Features_Label == "Self"
+   168                                                   ):  ## The vast majority of outputs are symmetric, but float errors appear to make some non-symmetric. If we can fix this that could be cool.
+   169         1    1054356.0    1e+06      1.3              ESSs = nanmaximum(ESSs, ESSs.T)
+   170                                                   #
+   171                                                   # Label_ESSs = pd.DataFrame(ESSs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
+   172         1       2321.0   2321.0      0.0          adata.varm[Secondary_Features_Label + "_ESSs"] = ESSs.T
+   173         2         53.0     26.5      0.0          print(
+   174         6          5.0      0.8      0.0              "ESSs for "
+   175         1          0.0      0.0      0.0              + Secondary_Features_Label
+   176         1          3.0      3.0      0.0              + " label have been saved to "
+   177         1          7.0      7.0      0.0              + "'adata.varm['"
+   178         1          0.0      0.0      0.0              + Secondary_Features_Label
+   179         1          1.0      1.0      0.0              + "_ESSs']'"
+   180                                                   )
+   181                                                   #
+   182         1        148.0    148.0      0.0      if np.isin("EPs", save_matrices):
+   183         1          5.0      5.0      0.0          EPs = Results[:, 1, :]
+   184         1          1.0      1.0      0.0          if Secondary_Features_Label == "Self":
+   185         1    1174990.0    1e+06      1.4              EPs = nanmaximum(EPs, EPs.T)
+   186                                                   #
+   187                                                   # Label_EPs = pd.DataFrame(EPs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
+   188         1        588.0    588.0      0.0          adata.varm[Secondary_Features_Label + "_EPs"] = EPs.T
+   189         2         34.0     17.0      0.0          print(
+   190         6         10.0      1.7      0.0              "EPs for "
+   191         1          0.0      0.0      0.0              + Secondary_Features_Label
+   192         1          1.0      1.0      0.0              + " label have been saved to "
+   193         1          0.0      0.0      0.0              + "'adata.varm['"
+   194         1          0.0      0.0      0.0              + Secondary_Features_Label
+   195         1          2.0      2.0      0.0              + "_EPs']'"
+   196                                                   )
+   197                                                   #
+   198         1        251.0    251.0      0.0      if np.isin("SWs", save_matrices):
+   199                                                   SWs = Results[:, 2, :]
+   200                                                   if Secondary_Features_Label == "Self":
+   201                                                       SWs = nanmaximum(SWs, SWs.T)
+   202                                                   #
+   203                                                   # Label_SWs = pd.DataFrame(SWs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
+   204                                                   adata.varm[Secondary_Features_Label + "_SWs"] = SWs.T
+   205                                                   print(
+   206                                                       "SWs for "
+   207                                                       + Secondary_Features_Label
+   208                                                       + " label have been saved to "
+   209                                                       + "'adata.varm['"
+   210                                                       + Secondary_Features_Label
+   211                                                       + "_SWs']'"
+   212                                                   )
+   213                                                   #
+   214         1         39.0     39.0      0.0      if np.isin("SGs", save_matrices):
+   215                                                   SGs = Results[:, 3, :]
+   216                                                   if Secondary_Features_Label == "Self":
+   217                                                       SGs = nanmaximum(SGs, SGs.T)
+   218                                                   #
+   219                                                   # Label_SGs = pd.DataFrame(SGs.T,columns=Fixed_Features.index,index=adata.var.index.tolist())
+   220                                                   adata.varm[Secondary_Features_Label + "_SGs"] = SGs.T
+   221                                                   print(
+   222                                                       "SGs for "
+   223                                                       + Secondary_Features_Label
+   224                                                       + " label have been saved to "
+   225                                                       + "'adata.varm['"
+   226                                                       + Secondary_Features_Label
+   227                                                       + "_SGs']'"
+   228                                                   )
+   229                                                   #
+   230         1          5.0      5.0      0.0      return adata
+
+  0.06 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:38 - Create_Scaled_Matrix
+  1.50 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:909 - ESE3
+  1.54 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:853 - ESE2
+  2.41 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:233 - nanmaximum
+  2.92 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:801 - ESE1
+ 14.68 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:484 - Calc_ESSs
+ 60.38 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:324 - Get_Overlap_Info
+ 78.05 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:259 - Calc_ES_Metrics
+ 82.12 seconds - /Users/shandc/Documents/ESFS/ESFS/ESFS.py:75 - Parallel_Calc_ES_Matricies

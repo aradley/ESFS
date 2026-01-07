@@ -7,6 +7,18 @@ This repository is currently in development and likely to change, but the underl
 Go to the Example_Workflows folder to see some example workflows that you will hopefully be able to easily adapt for your own data.
 
 ### Installation
-1. Retreive the ripository with: git clone git@github.com:aradley/ESFS.git
-2. Navigate to the directory where the clone was downloaded to, for example: cd ESFS/
-3. Run the following on the command line: python3 setup.py install
+Either install this repository directly via:
+
+```
+pip install git+ssh://git@github.com/aradley/ESFS.git
+```
+
+or clone and then install:
+
+```
+git clone git@github.com:aradley/ESFS.git
+cd ESFS
+pip install .
+```
+
+You should do this within an environment, using something like `uv`, `venv`, or `conda`.
