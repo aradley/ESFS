@@ -12,7 +12,7 @@ Datasets for reproducing the example workflows may be found at the following Men
 Either install this repository directly via:
 
 ```
-pip install git+ssh://git@github.com/aradley/ESFS.git
+pip install git+https://github.com/aradley/ESFS.git
 ```
 
 or clone and then install:
@@ -29,12 +29,10 @@ You should do this within an environment, using something like `uv`, `venv`, or 
 
 ![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
 
-This repository is currently in development and likely to change, but the underlying cESFW theory should be locked in at this point.
-
 ## GPU acceleration
 
 For large datasets, users may wish to use the GPU accelerated version of ESFS to perform ES correlation metric calculations.
 
 By default the GPU version of ESFS will be loaded when running ``` import esfs ``` if a compatible version of CUDA is installed on the machine, and a message will print saying that the GPU version is in use.
 
-If users wish to force ESFS to run using CPUs, they may do so by running ``` esfs.configure(GPU=False) ``` after running ``` import esfs ```.
+If users wish to force ESFS to run using CPUs, they may do so by running ``` esfs.configure(gpu=False) ``` after running ``` import esfs ```.
