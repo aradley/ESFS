@@ -109,6 +109,8 @@ def _convert_sparse_array(arr, to_scipy: bool = False):
         arr = arr.tocsc()
     # If not sparse, convert to sparse with whatever backend is being used
     else:
+        # Ensure underlying array is on correct device/backend before sparsifying
+        arr = xp.asarray(arr)
         arr = xpsparse.csc_matrix(arr)
     # If user wants scipy sparse output, convert back
     if to_scipy and USING_GPU:

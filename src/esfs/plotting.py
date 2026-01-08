@@ -170,6 +170,7 @@ def ES_rank_genes(
         print(df_ranks)
     ##
     norm_network_feature_weights = convert_to_numpy(norm_network_feature_weights)
+    sorted_indices = convert_to_numpy(sorted_indices)
     norm_weights = pd.DataFrame(
         norm_network_feature_weights[sorted_indices], index=rank_sorted_names
     )
