@@ -13,9 +13,17 @@ import umap
 from .backend import backend
 from .ESFS import _convert_sparse_array, move_to_gpu, convert_to_numpy
 
+# Module-level shortcuts, set at import time
 xp = backend.xp
 xpsparse = backend.xpsparse
 USING_GPU = backend.using_gpu
+# Whenever configure() is run, this updates the references
+def _update_module_backend():
+    """Update module-level backend references. Called after configure()."""
+    global xp, xpsparse, USING_GPU
+    xp = backend.xp
+    xpsparse = backend.xpsparse
+    USING_GPU = backend.using_gpu
 
 
 def knn_smooth_gene_expression(

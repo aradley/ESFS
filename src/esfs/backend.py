@@ -80,6 +80,10 @@ def configure(gpu: bool, upcast: bool = False):
         backend.dtype = backend.xp.float64
     else:
         backend.dtype = backend.xp.float32
+    # Now update ESFS module dtype
+    from . import ESFS, plotting
+    ESFS._update_module_backend()
+    plotting._update_module_backend()
 
 # Try to use GPU backend by default, triggering on import
 # Use float32 as default to avoid memory issues
