@@ -7,6 +7,7 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
+import scipy.sparse as spsparse
 from sklearn.cluster import KMeans, HDBSCAN
 import umap
 
@@ -37,23 +38,22 @@ def knn_smooth_gene_expression(
 ):
     assert metric == "correlation", "Currently only 'correlation' metric is supported."
 
-    use_gene_idxs = xp.nonzero(xp.isin(xp.asarray(adata.var_names), use_genes))[0]
+    use_gene_idxs = np.nonzero(np.isin(np.asarray(adata.var_names), use_genes))[0]
 
     # NOTE: If needed in future, could try to keep sparse, similar to create_scaled_matrix
     X_subset = adata[:, use_gene_idxs].X
-    if xpsparse.issparse(X_subset):
+    if spsparse.issparse(X_subset):
         X_subset = X_subset.toarray()
+    elif xpsparse.issparse(X_subset):
+        # If we reach this, it must be a cupy sparse array so we can .get() directly
+        X_subset = X_subset.toarray().get()
     if log_scale:
-        X_subset = xp.log2(X_subset + 1)
+        X_subset = np.log2(X_subset + 1)
 
     n_cells = X_subset.shape[0]
     print(
         f"Computing batched correlation distances for {n_cells} cells, batch size = {batch_size}"
     )
-
-    # Simplify by ensuring remainder is done on CPU
-    if USING_GPU:
-        X_subset = X_subset.get()
 
     # Function to compute distances for a batch
     def compute_batch(i_start, i_end):
@@ -75,11 +75,12 @@ def knn_smooth_gene_expression(
     neighbors = np.vstack(all_neighbors)
 
     # Get full expression matrix for smoothing
+    # NOTE: If needed in future, could try to keep sparse, similar to create_scaled_matrix
     full_X = adata.X
-    if xpsparse.issparse(full_X):
+    if spsparse.issparse(full_X):
         full_X = full_X.toarray()
-        if USING_GPU:
-            full_X = full_X.get()
+    elif xpsparse.issparse(full_X):
+        full_X = full_X.toarray().get()
     if log_scale:
         full_X = np.log2(full_X + 1)
 
@@ -413,11 +414,12 @@ def plot_gene_cluster_cell_UMAPs(
 
     elif cell_label in adata.var.index:
         expression = adata[:, cell_label].X.T
-        if xpsparse.issparse(expression):
+        if spsparse.issparse(expression):
             expression = expression.toarray()
-            if USING_GPU:
-                expression = expression.get()
-        expression = np.asarray(expression)[0]
+        elif xpsparse.issparse(expression):
+            # If we reach this, it must be a cupy sparse array so we can .get() directly
+            expression = expression.toarray().get()
+        expression = expression.squeeze()
         if log2_gene_expression:
             expression = np.log2(expression + 1)
 
