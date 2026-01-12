@@ -25,6 +25,18 @@ pip install .
 
 You should do this within an environment, using something like `uv`, `venv`, or `conda`.
 
+#### GPU Installation
+
+To install ESFS with CuPy so that it can run on a GPU, please modify the above lines accordingly:
+
+```
+pip install "esfs[gpu] @ git+https://github.com/aradley/ESFS.git"
+```
+or
+```
+pip install '.[gpu]'
+```
+
 ## Software overview
 
 ![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
