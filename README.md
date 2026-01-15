@@ -4,7 +4,7 @@ ESFS is an Entropy Sorting based feature selection package primarily developed f
 
 Please see our manuscript for details regarding ESFS - 
 
-Go to the Example_Workflows folder to see some example workflows that you will hopefully be able to easily adapt for your own data.
+Go to the Example_Workflows folder to see some example workflows that you may adapt for your own data.
 
 Datasets for reproducing the example workflows may be found at the following Mendeley Data repsitory - 
 
