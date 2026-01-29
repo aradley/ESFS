@@ -9,14 +9,14 @@ import warnings
 
 import anndata as ad
 import multiprocess
-from numba import njit, prange
+from numba import njit, prange, set_num_threads, get_num_threads
 import numpy as np
 from numpy.typing import ArrayLike
 import pandas as pd
 from pathos.pools import ProcessPool
 from p_tqdm import p_map
 import scipy.sparse as spsparse
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from .backend import backend
 
@@ -144,9 +144,9 @@ def parallel_calc_es_matrices(
 
     `save_matrices` disctates which ES metrics will be written to the outputted adata object. The options are "ESSs", "EPs", "SGs", "SWs".
 
-    `use_cores` defines how many CPU cores to use. Is use_cores = -1, the software will use N-1 the number of cores available on the machine.
+    `use_cores` defines how many CPU cores/threads to use. If use_cores = -1, the software will use N-1 cores available on the machine.
 
-    `chunksize` is either used to chunk ESS calculation when using GPU acceleration, or passed to pathos when using CPU parallelisation.
+    `chunksize` controls the chunk size for progress bar updates (default: 5% of total features).
     """
     ## Establish which secondary_features will be compared against each of the features in adata
     global secondary_features
@@ -188,46 +188,43 @@ def parallel_calc_es_matrices(
     )
     ## Parallel compute
     with np.errstate(divide="ignore", invalid="ignore"):
-        # Use our GPU-accelerated vectorised function if possible
-        if USING_GPU:
-            results = calc_es_metrics_vec(
-                feature_inds,
-                sample_cardinality=sample_cardinality,
-                feature_sums=feature_sums,
-                minority_states=minority_states,
-                chunksize=chunksize,
-            )
-        elif use_cores == 1:
-            # Single core: run sequentially for easier debugging (only)
-            warnings.warn(
-                "Running ESFS in single-core mode. This is not recommended for large datasets as it will be slow. Set use_cores to -1 or a positive integer to parallelize."
-            )
-            results = [
-                calc_es_metrics(
-                    ind,
-                    sample_cardinality=sample_cardinality,
-                )
-                for ind in tqdm(feature_inds)
-            ]
-        else:
-            # Multi-core: use parallel processing
-            with ProcessPool(nodes=use_cores) as pool:
-                results = []
-                for res in tqdm(
-                    pool.imap(
-                        partial(calc_es_metrics, sample_cardinality=sample_cardinality),
-                        feature_inds,
-                        chunksize=chunksize if chunksize is not None else 1, # Default chunksize to 1 if not provided
-                    ),
-                    total=len(feature_inds),
-                ):
-                    results.append(res)
-                pool.clear()
+        # Set number of threads for Numba parallel execution (CPU only)
+        original_num_threads = get_num_threads()
+        if not USING_GPU and use_cores > 0:
+            set_num_threads(use_cores)
+
+        # Determine chunk size for progress bar (default: 5% of total features)
+        n_features_total = len(feature_inds)
+        progress_chunksize = chunksize if chunksize is not None else max(1, n_features_total // 20)
+
+        # Process in chunks with progress bar showing genes processed
+        all_results = []
+        try:
+            with tqdm(total=n_features_total, desc="Processing features", unit="genes") as pbar:
+                for chunk_start in range(0, n_features_total, progress_chunksize):
+                    chunk_end = min(chunk_start + progress_chunksize, n_features_total)
+                    chunk_inds = feature_inds[chunk_start:chunk_end]
+
+                    chunk_results = calc_es_metrics_vec(
+                        chunk_inds,
+                        sample_cardinality=sample_cardinality,
+                        feature_sums=feature_sums,
+                        minority_states=minority_states,
+                        chunksize=None,
+                    )
+                    all_results.append(chunk_results)
+                    pbar.update(chunk_end - chunk_start)
+        finally:
+            # Restore original number of threads
+            if not USING_GPU:
+                set_num_threads(original_num_threads)
+
+        # Concatenate results from all chunks
+        results = tuple(xp.concatenate([r[i] for r in all_results], axis=0) for i in range(4))
+
     ## Unpack results
     results = xp.asarray(results)
-    # NOTE: GPU/vectorised code gives (4, samples, samples) shape, while original CPU gives (samples, 4, samples), so align
-    if USING_GPU:
-        results = xp.moveaxis(results, 0, 1)
+    results = xp.moveaxis(results, 0, 1)
     ## Save outputs requested by the save_matrices paramater
     if "ESSs" in save_matrices:
         ESSs = results[:, 0, :]
@@ -384,70 +381,6 @@ def move_to_gpu(
     else:
         return arrs
 
-def calc_es_metrics(feature_ind, sample_cardinality):
-    """
-    This function calcualtes the ES metrics for one of the features in the secondary_features object against
-    every variable/feature in the adata object.
-
-    `feature_ind` - Indicates the column of secondary_features being used.
-    `sample_cardinality` - Inherited scalar of the number of samples in adata.
-    `feature_sums` - Inherited vector of the columns sums of adata.
-    `minority_states` - Inherited vector of the minority state sums of each column of adata.
-    """
-    ## Extract the Fixed Feature (FF)
-    fixed_feature = secondary_features[:, feature_ind].A
-    fixed_feature_cardinality = xp.sum(fixed_feature)
-    fixed_feature_minority_state = fixed_feature_cardinality
-    if fixed_feature_minority_state >= (sample_cardinality / 2):
-        fixed_feature_minority_state = sample_cardinality - fixed_feature_minority_state
-    ## Identify where FF is the QF or RF
-    FF_QF_vs_RF = xp.zeros(feature_sums.shape[0])
-    FF_QF_vs_RF[xp.nonzero(fixed_feature_minority_state > minority_states)[0]] = (
-        1  # 1's mean FF is QF
-    )
-    ## Caclulate the QFms, RFms, RFMs and QFMs for each FF and secondary feature pair
-    RFms = minority_states.copy()
-    idxs = xp.where(FF_QF_vs_RF == 0)[0]
-    RFms[idxs] = fixed_feature_minority_state
-    RFMs = sample_cardinality - RFms
-    QFms = minority_states.copy()
-    idxs = xp.where(FF_QF_vs_RF == 1)[0]
-    QFms[idxs] = fixed_feature_minority_state
-    QFMs = sample_cardinality - QFms
-    ## Calculate the values of (x) that correspond to the maximum for each overlap scenario (mm, Mm, mM and MM) (m = minority, M = majority)
-    max_ent_x_mm = (RFms * QFms) / (RFms + RFMs)
-    max_ent_x_Mm = (QFMs * RFms) / (RFms + RFMs)
-    max_ent_x_mM = (RFMs * QFms) / (RFms + RFMs)
-    max_ent_x_MM = (RFMs * QFMs) / (RFms + RFMs)
-    max_ent_options = xp.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
-    ######
-    ## Caclulate the overlap between the FF states and the secondary features, using the correct ESE (1-4)
-    all_use_cases, all_overlaps_options, all_used_inds = get_overlap_info(
-        fixed_feature,
-        fixed_feature_cardinality,
-        sample_cardinality,
-        feature_sums,
-        FF_QF_vs_RF,
-    )
-    ## Having extracted the overlaps and their respective ESEs (1-4), calcualte the ESS and EPs
-    ESSs, D_EPs, O_EPs, SWs, SGs = calc_ESSs_old(
-        RFms,
-        QFms,
-        RFMs,
-        QFMs,
-        max_ent_options,
-        sample_cardinality,
-        all_overlaps_options,
-        all_use_cases,
-        all_used_inds,
-    )
-    identical_features = xp.nonzero(ESSs == 1)[0]
-    D_EPs[identical_features] = 0
-    O_EPs[identical_features] = 0
-    EPs = nanmaximum(D_EPs, O_EPs)
-    return ESSs, EPs, SWs, SGs
-
-
 def calc_es_metrics_vec(
     feature_inds, sample_cardinality, feature_sums, minority_states, num_cores=-1, chunksize: Optional[int] = None
 ):
@@ -526,161 +459,6 @@ def calc_es_metrics_vec(
     return all_ESSs, all_EPs, all_SWs, all_SGs
 
 
-def get_overlap_info(
-    fixed_feature,
-    fixed_feature_cardinality,
-    sample_cardinality,
-    feature_sums,
-    FF_QF_vs_RF,
-):
-    """
-    For any pair of features the ES mathematical framework has a set of logical rules regarding how the ES metrics
-    should be calcualted. These logical rules dictate which of the two features is the reference feature (RF) or query feature
-    (QF) and which of the 4 Entropy Sort Equations (ESE 1-4) should be used (Add reference to supplemental figure of
-    new manuscript when ready).
-    """
-    ## Set up an array to track which of ESE equations 1-4 the recorded observed overlap relates to (row), and if it is
-    # native correlation (1) or flipped anti-correlation (-1). Row 1 = mm, row 2 = Mm, row 3 = mM, row 4 = MM.
-    all_use_cases = xp.zeros((4, feature_sums.shape[0]))
-    ## Set up an array to track the observed overlaps between the FF and the secondary features.
-    all_overlaps_options = xp.zeros((4, feature_sums.shape[0]))
-    ## Set up a list to track the used inds/features for each ESE
-    all_used_inds = [[] for _ in range(4)]
-    ####
-    ## Pairwise calculate total overlaps of FF values with the values every other a feature in adata
-    nonzero_inds = xp.where(fixed_feature != 0)[0]
-    sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    if (sub_global_scaled_matrix.indices.shape[0] > 0) and (nonzero_inds.shape[0] > 0):
-        B = xpsparse.csc_matrix(
-            (
-                fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
-                sub_global_scaled_matrix.indices,
-                sub_global_scaled_matrix.indptr,
-            )
-        )
-        if USING_GPU:
-            overlaps = sub_global_scaled_matrix.minimum(B.tocsr()).sum(axis=0)[0]
-        else:
-            overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
-    else:
-        overlaps = xp.zeros(global_scaled_matrix.shape[1])
-    ## Pairwise calculate total overlaps of Inverse FF values with the values every other a feature in adata
-    inverse_fixed_feature = 1 - fixed_feature  # xp.max(fixed_feature) - fixed_feature
-    nonzero_inds = xp.where(inverse_fixed_feature != 0)[0]
-    sub_global_scaled_matrix = global_scaled_matrix[nonzero_inds, :]
-    if (sub_global_scaled_matrix.indices.shape[0] > 0) and (nonzero_inds.shape[0] > 0):
-        B = xpsparse.csc_matrix(
-            (
-                inverse_fixed_feature[nonzero_inds].T[0][sub_global_scaled_matrix.indices],
-                sub_global_scaled_matrix.indices,
-                sub_global_scaled_matrix.indptr,
-            )
-        )
-        if USING_GPU:
-            inverse_overlaps = sub_global_scaled_matrix.minimum(B.tocsr()).sum(axis=0)[0]
-        else:
-            inverse_overlaps = sub_global_scaled_matrix.minimum(B).sum(axis=0).A[0]
-    else:
-        inverse_overlaps = xp.zeros(global_scaled_matrix.shape[1])
-    ####
-    ### Using the logical rules of ES to work out which ESE should be used for each pair of features beign compared.
-    ## If FF is observed in it's minority state, use the following 4 steps to caclulate overlaps with every other feature
-    if fixed_feature_cardinality < (sample_cardinality / 2):
-        #######
-        ## FF and other feature are minority states & FF is QF
-        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
-        ## Track which features are observed as mm (row 1), and which are mM when the secondary feature is flipped (row 3)
-        all_use_cases[:, calc_idxs] = xp.array([1, -1, 0, 0]).reshape(4, 1)
-        ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
-        # and Global_Scaled_Matrix_Inverse for inverse observations.
-        all_overlaps_options[0, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
-        all_overlaps_options[1, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
-        #######
-        ## FF and other feature are minority states & FF is RF
-        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
-        ## Track which features are observed as mm (row 1), and which are Mm when the secondary feature is flipped (row 2)
-        all_use_cases[:, calc_idxs] = xp.array([1, 0, -1, 0]).reshape(4, 1)
-        ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
-        # and Global_Scaled_Matrix_Inverse for inverse observations.
-        all_overlaps_options[0, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
-        all_overlaps_options[2, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
-        #######
-        ## FF is minority, other feature is majority & FF is QF
-        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
-        ## Track which features are observed as mM (row 4), and which are mm when the secondary feature is flipped (row 1)
-        all_use_cases[:, calc_idxs] = xp.array([0, 0, 1, -1]).reshape(4, 1)
-        ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
-        # and Global_Scaled_Matrix_Inverse for inverse observations.
-        all_overlaps_options[3, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
-        all_overlaps_options[2, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
-        #######
-        ## FF is minority, other feature is majority & FF is RF
-        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
-        ## Track which features are observed as Mm (row 2), and which are mm when the secondary feature is flipped (row 1)
-        all_use_cases[:, calc_idxs] = xp.array([0, 1, 0, -1]).reshape(4, 1)
-        ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
-        # and Global_Scaled_Matrix_Inverse for inverse observations.
-        all_overlaps_options[3, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
-        all_overlaps_options[1, calc_idxs] = overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
-        #
-    ## If FF is observed in it's majority state, use the following 4 steps to caclulate overlaps with every other feature
-    if fixed_feature_cardinality >= (sample_cardinality / 2):
-        #######
-        ## FF is majority, other feature is minority & FF is QF
-        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
-        ## Track which features are observed as Mm (row 2), and which are MM when the secondary feature is flipped (row 4)
-        all_use_cases[:, calc_idxs] = xp.array([-1, 1, 0, 0]).reshape(4, 1)
-        ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
-        # and Global_Scaled_Matrix_Inverse for inverse observations.
-        all_overlaps_options[1, calc_idxs] = overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
-        all_overlaps_options[0, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
-        #######
-        ## FF is majority, other feature is minority & FF is RF
-        calc_idxs = xp.where((feature_sums < (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
-        ## Track which features are observed as mM (row 3), and which are MM when the secondary feature is flipped (row 4)
-        all_use_cases[:, calc_idxs] = xp.array([-1, 0, 1, 0]).reshape(4, 1)
-        ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
-        # and Global_Scaled_Matrix_Inverse for inverse observations.
-        all_overlaps_options[2, calc_idxs] = overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
-        all_overlaps_options[0, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mm
-        all_used_inds[0] = xp.append(all_used_inds[0], calc_idxs)
-        #######
-        ## FF is majority, other feature is majority & FF is QF
-        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 1))[0]
-        ## Track which features are observed as MM (row 4), and which are Mm when the secondary feature is flipped (row 2)
-        all_use_cases[:, calc_idxs] = xp.array([0, 0, -1, 1]).reshape(4, 1)
-        ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
-        # and Global_Scaled_Matrix_Inverse for inverse observations.
-        all_overlaps_options[2, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_mM
-        all_used_inds[2] = xp.append(all_used_inds[2], calc_idxs)
-        all_overlaps_options[3, calc_idxs] = overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
-        #######
-        ## FF is majority, other feature is majority & FF is RF
-        calc_idxs = xp.where((feature_sums >= (sample_cardinality / 2)) & (FF_QF_vs_RF == 0))[0]
-        ## Track which features are observed as MM (row 4), and which are mM when the secondary feature is flipped (row 3)
-        all_use_cases[:, calc_idxs] = xp.array([0, -1, 0, 1]).reshape(4, 1)
-        ## Calcualte the overlaps as the sum of minimums between samples, using global_scaled_matrix for natural observations
-        # and Global_Scaled_Matrix_Inverse for inverse observations.
-        all_overlaps_options[1, calc_idxs] = inverse_overlaps[calc_idxs]  # Overlaps_Mm
-        all_used_inds[1] = xp.append(all_used_inds[1], calc_idxs)
-        all_overlaps_options[3, calc_idxs] = overlaps[calc_idxs]  # Overlaps_MM
-        all_used_inds[3] = xp.append(all_used_inds[3], calc_idxs)
-        #
-    return all_use_cases, all_overlaps_options, all_used_inds
-
-
 def get_overlap_info_vec(
     fixed_features, fixed_features_cardinality, sample_cardinality, feature_sums, FF_QF_vs_RF, njobs
 ):
@@ -741,21 +519,17 @@ def get_overlap_info_vec(
             ),
         )
     else:
-        overlaps = overlaps_cpu_parallel(
-            fixed_features.toarray(),
+        # Use sparse-sparse two-pointer merge (no densification needed)
+        overlaps, inverse_overlaps = overlaps_and_inverse_sparse(
+            fixed_features.data,
+            fixed_features.indices,
+            fixed_features.indptr,
             global_scaled_matrix.data,
             global_scaled_matrix.indices,
             global_scaled_matrix.indptr,
-            fixed_features.shape[1],
-            global_scaled_matrix.shape[1],
-        )
-        inverse_overlaps = overlaps_cpu_parallel(
-            1 - fixed_features.toarray(),
-            global_scaled_matrix.data,
-            global_scaled_matrix.indices,
-            global_scaled_matrix.indptr,
-            fixed_features.shape[1],
-            global_scaled_matrix.shape[1],
+            fixed_features.shape[0],      # n_samples
+            fixed_features.shape[1],      # n_fixed_features
+            global_scaled_matrix.shape[1] # n_features
         )
 
     # Calculate our ineqs and reshape for broadcasting
@@ -957,6 +731,98 @@ def overlaps_cpu_parallel(fixed_features, data, indices, indptr, n_fixed_feature
                     sum_val += min(ff_val, gs_val)
             overlaps[i, j] = sum_val
     return overlaps
+
+
+@njit(parallel=True)
+def overlaps_and_inverse_sparse(
+    ff_data, ff_indices, ff_indptr,      # Fixed features CSC components
+    gs_data, gs_indices, gs_indptr,      # Global scaled matrix CSC components
+    n_samples, n_fixed_features, n_features
+):
+    """
+    Compute overlaps and inverse_overlaps using two-pointer merge on sparse matrices.
+
+    Parameters:
+        ff_data: Non-zero values from fixed_features sparse matrix
+        ff_indices: Row indices for ff_data
+        ff_indptr: Column pointers for fixed_features (CSC format)
+        gs_data: Non-zero values from global_scaled_matrix
+        gs_indices: Row indices for gs_data
+        gs_indptr: Column pointers for global_scaled_matrix (CSC format)
+        n_samples: Number of samples (rows)
+        n_fixed_features: Number of fixed features (columns in fixed_features)
+        n_features: Number of features (columns in global_scaled_matrix)
+
+    Returns:
+        (overlaps, inverse_overlaps): Both shaped (n_fixed_features, n_features)
+    """
+    # Initialize output arrays
+    overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
+    inverse_overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
+
+    # Step 3: Outer loop - parallelize over fixed features
+    for i in prange(n_fixed_features):
+        # Get the start and end indices for column i of fixed_features
+        ff_start = ff_indptr[i]
+        ff_end = ff_indptr[i + 1]
+
+        # Step 4: Middle loop - iterate over all features
+        for j in range(n_features):
+            # Get the start and end indices for column j of global_scaled_matrix
+            gs_start = gs_indptr[j]
+            gs_end = gs_indptr[j + 1]
+
+            # Initialize accumulators
+            overlap_sum = 0.0
+            inverse_overlap_sum = 0.0
+
+            # Step 5: Two-pointer merge algorithm
+            ff_ptr = ff_start
+            gs_ptr = gs_start
+
+            while ff_ptr < ff_end and gs_ptr < gs_end:
+                ff_row = ff_indices[ff_ptr]
+                gs_row = gs_indices[gs_ptr]
+
+                if ff_row == gs_row:
+                    # Case 3: Both non-zero
+                    ff_val = ff_data[ff_ptr]
+                    gs_val = gs_data[gs_ptr]
+                    overlap_sum += min(ff_val, gs_val)
+                    inverse_overlap_sum += min(1.0 - ff_val, gs_val)
+                    ff_ptr += 1
+                    gs_ptr += 1
+                elif ff_row < gs_row:
+                    # ff has non-zero at this row, but gs doesn't (gs=0)
+                    # For overlaps: min(ff_val, 0) = 0, no contribution
+                    # For inverse_overlaps: min(1-ff_val, 0) = 0, no contribution
+                    ff_ptr += 1
+                else:  # ff_row > gs_row
+                    # Case 2: ff=0, gs≠0
+                    gs_val = gs_data[gs_ptr]
+                    # For overlaps: min(0, gs_val) = 0, no contribution
+                    # For inverse_overlaps: min(1-0, gs_val) = gs_val
+                    inverse_overlap_sum += gs_val
+                    gs_ptr += 1
+
+            # Step 6: Handle remaining elements
+            # If ff_ptr exhausted but gs_ptr hasn't, those are gs≠0, ff=0 cases
+            while gs_ptr < gs_end:
+                gs_val = gs_data[gs_ptr]
+                inverse_overlap_sum += gs_val
+                gs_ptr += 1
+
+            # If gs_ptr exhausted but ff_ptr hasn't, those are ff≠0, gs=0 cases
+            # For overlaps: min(ff_val, 0) = 0
+            # For inverse_overlaps: min(1-ff_val, 0) = 0
+            # So no contribution, we can skip
+
+            # Store results
+            overlaps[i, j] = overlap_sum
+            inverse_overlaps[i, j] = inverse_overlap_sum
+
+    return overlaps, inverse_overlaps
+
 
 def calc_ESSs_chunked(
     RFms,
