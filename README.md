@@ -12,13 +12,13 @@ Datasets for reproducing the example workflows may be found at the following Men
 Either install this repository directly via:
 
 ```
-pip install git+https://github.com/aradley/ESFS.git
+pip install git+https://github.com/aradley/ESFS.git@memory_optimised
 ```
 
 or clone and then install:
 
 ```
-git clone git@github.com:aradley/ESFS.git
+git clone -b memory_optimised git@github.com:aradley/ESFS.git
 cd ESFS
 pip install .
 ```
@@ -29,25 +29,77 @@ You should do this within an environment, using something like `uv`, `venv`, or 
 
 ![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
 
-## GPU acceleration
+## GPU acceleration (NVIDIA/CUDA)
 
-For large datasets, users may wish to use the GPU accelerated version of ESFS to perform ES correlation metric calculations.
-
-To install the GPU enabled version of ESFS, please use the following which will icorperate CuPy into the installation:
+For large datasets on systems with NVIDIA GPUs, ESFS supports GPU acceleration via CuPy:
 
 ```
-pip install "esfs[gpu] @ git+https://github.com/aradley/ESFS.git"
+pip install "esfs[gpu] @ git+https://github.com/aradley/ESFS.git@memory_optimised"
 ```
 
 or clone and then install:
 
 ```
-git clone git@github.com:aradley/ESFS.git
+git clone -b memory_optimised git@github.com:aradley/ESFS.git
 cd ESFS
 pip install '.[gpu]'
 ```
 
+This requires a compatible version of CUDA to be installed on your machine.
 
-By default the GPU version of ESFS will be loaded when running ``` import esfs ``` if a compatible version of CUDA is installed on the machine, and a message will print saying that the GPU version is in use. If you have installed the GPU version but CUDA is not avaialble on your machine, ESFS will default to to the CPU version and print a message telling you it has done so.
+## Apple Silicon GPU acceleration (MLX)
 
-If users wish to force ESFS to run using CPUs even when CUDA is available, they may do so by running ``` esfs.configure(gpu=False) ``` after running ``` import esfs ```.
+For Mac users with Apple Silicon (M1/M2/M3, etc.), ESFS supports GPU acceleration via Apple's MLX framework:
+
+```
+pip install "esfs[mlx] @ git+https://github.com/aradley/ESFS.git@memory_optimised"
+```
+
+or clone and then install:
+
+```
+git clone -b memory_optimised git@github.com:aradley/ESFS.git
+cd ESFS
+pip install '.[mlx]'
+```
+
+## Backend configuration
+
+By default, ESFS will auto-detect and use the best available backend when you run `import esfs`:
+- **CUDA/CuPy** (NVIDIA GPU) - if CuPy is installed and CUDA is available
+- **MLX/Metal** (Apple Silicon GPU) - if MLX is installed and Metal is available
+- **CPU (NumPy/Numba)** - fallback if no GPU backend is available
+
+A banner will display showing which backend is active.
+
+### Switching backends manually
+
+You can switch backends at runtime after importing ESFS:
+
+```python
+import esfs
+
+# Force CPU (NumPy/Numba)
+esfs.backend.use_cpu()
+
+# Force CUDA (NVIDIA GPU)
+esfs.backend.use_gpu()
+
+# Force MLX (Apple Silicon GPU)
+esfs.backend.use_mlx()
+
+# Or use configure() for more control
+esfs.backend.configure(gpu=False)           # Force CPU
+esfs.backend.configure(gpu=True)            # Auto-detect GPU
+esfs.backend.configure(gpu=True, upcast=True)  # GPU with float64 precision
+```
+
+### Precision
+
+By default, ESFS uses float32 precision to save memory. For higher precision (at the cost of more memory), use:
+
+```python
+esfs.backend.configure(gpu=True, upcast=True)  # float64 precision
+```
+
+Note: MLX/Metal does not support float64. If you need float64 precision on Apple Silicon, use the CPU backend.

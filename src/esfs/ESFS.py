@@ -24,13 +24,15 @@ from .backend import backend
 xp = backend.xp
 xpsparse = backend.xpsparse
 USING_GPU = backend.using_gpu
+USING_MLX = backend.using_mlx
 # Whenever configure() is run, this updates the references
 def _update_module_backend():
     """Update module-level backend references. Called after configure()."""
-    global xp, xpsparse, USING_GPU
+    global xp, xpsparse, USING_GPU, USING_MLX
     xp = backend.xp
     xpsparse = backend.xpsparse
     USING_GPU = backend.using_gpu
+    USING_MLX = backend.using_mlx
 
 ###### Entropy Sorting (ES) metric calculations ######
 
@@ -96,7 +98,7 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
     # Clip and scale
     scaled_expressions.data = xp.minimum(scaled_expressions.data, upper_broadcast)
     scaled_expressions.data = scaled_expressions.data / upper_broadcast
-    # Downcast to float32 when storing
+    # Store as float32 to save memory (values are 0-1, so float32 precision is sufficient)
     adata.layers["Scaled_Counts"] = scaled_expressions.astype(xp.float32)
     return adata
 
@@ -298,16 +300,25 @@ def parallel_calc_es_matrices(
     return adata
 
 def get_num_cores(use_cores: int):
-    # Grab number of cores available
+    # Check current backend state (read from backend module, not stale module-level vars)
+    if backend.using_gpu:
+        print("Compute: CUDA/CuPy (NVIDIA GPU)")
+        return use_cores  # use_cores is ignored for GPU but return it anyway
+    elif backend.using_mlx:
+        print("Compute: MLX/Metal (Apple Silicon GPU)")
+        return use_cores  # use_cores is ignored for GPU but return it anyway
+
+    # CPU backend: show cores information
     cores_avail = multiprocess.cpu_count()
     # Special check if we're running in a SLURM environment, where CPU count does not match CPUs allocated
     if "SLURM_CPUS_ON_NODE" in os.environ:
         cores_avail = min(cores_avail, int(os.environ["SLURM_CPUS_ON_NODE"]))
-    print("Cores Available: " + str(cores_avail))
+    print("Compute: CPU (NumPy/Numba)")
+    print("  Cores Available: " + str(cores_avail))
     # If user sets -1, use all avail but one core (arbitrary buffer)
     if use_cores == -1:
         use_cores = max(cores_avail - 1, 1)
-    print("Cores Used: " + str(use_cores))
+    print("  Cores Used: " + str(use_cores))
     return use_cores
 
 def nanmaximum(arr1, arr2):
@@ -469,12 +480,19 @@ def get_overlap_info_vec(
     new manuscript when ready).
     """
     ## Pairwise calculate total overlaps of FF values with the values every other a feature in adata
+    # Determine precision from backend.dtype
+    use_float64 = (backend.dtype == np.float64)
+
     if USING_GPU:
-        # Convert to CSC format for column-wise access (if not already)
         fixed_features_csc = fixed_features.tocsc()
         global_scaled_matrix_csc = global_scaled_matrix.tocsc()
-        overlaps = xp.zeros((fixed_features.shape[1], feature_sums.shape[0]), dtype=xp.float32)
-        kernel = overlaps_sparse_cuda()
+
+        # Allocate output arrays with configured precision
+        overlaps = xp.zeros((fixed_features.shape[1], feature_sums.shape[0]), dtype=backend.dtype)
+        inverse_overlaps = xp.zeros((fixed_features.shape[1], feature_sums.shape[0]), dtype=backend.dtype)
+
+        # Single combined kernel call (computes both overlaps and inverse_overlaps in one pass)
+        kernel = overlaps_and_inverse_cuda(use_float64=use_float64)
         block = (16, 16)
         grid = (
             (fixed_features.shape[1] + block[0] - 1) // block[0],
@@ -484,39 +502,24 @@ def get_overlap_info_vec(
             grid,
             block,
             (
-                fixed_features_csc.data.astype(xp.float32),
+                fixed_features_csc.data.astype(backend.dtype),
                 fixed_features_csc.indices,
                 fixed_features_csc.indptr,
-                global_scaled_matrix_csc.data.astype(xp.float32),
+                global_scaled_matrix_csc.data.astype(backend.dtype),
                 global_scaled_matrix_csc.indices,
                 global_scaled_matrix_csc.indptr,
                 overlaps.ravel(),
-                fixed_features.shape[1],
-                feature_sums.shape[0],
-            ),
-        )
-
-        # Now compute inverse overlaps using sparse-aware kernel
-        inverse_overlaps = xp.zeros(
-            (fixed_features.shape[1], feature_sums.shape[0]), dtype=xp.float32
-        )
-        kernel_inv = inverse_overlaps_sparse_cuda()
-        kernel_inv(
-            grid,
-            block,
-            (
-                fixed_features_csc.data.astype(xp.float32),
-                fixed_features_csc.indices,
-                fixed_features_csc.indptr,
-                global_scaled_matrix_csc.data.astype(xp.float32),
-                global_scaled_matrix_csc.indices,
-                global_scaled_matrix_csc.indptr,
-                feature_sums.astype(xp.float32),
                 inverse_overlaps.ravel(),
-                fixed_features.shape[0],
                 fixed_features.shape[1],
                 feature_sums.shape[0],
             ),
+        )
+    elif USING_MLX:
+        from .backend_mlx import overlaps_and_inverse_mlx
+        fixed_features_csc = fixed_features.tocsc()
+        global_scaled_matrix_csc = global_scaled_matrix.tocsc()
+        overlaps, inverse_overlaps = overlaps_and_inverse_mlx(
+            fixed_features_csc, global_scaled_matrix_csc, use_float64=use_float64
         )
     else:
         # Use sparse-sparse two-pointer merge (no densification needed)
@@ -529,7 +532,8 @@ def get_overlap_info_vec(
             global_scaled_matrix.indptr,
             fixed_features.shape[0],      # n_samples
             fixed_features.shape[1],      # n_fixed_features
-            global_scaled_matrix.shape[1] # n_features
+            global_scaled_matrix.shape[1], # n_features
+            use_float64=use_float64
         )
 
     # Calculate our ineqs and reshape for broadcasting
@@ -581,142 +585,109 @@ def get_overlap_info_vec(
     return overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup
 
 
-def overlaps_sparse_cuda():
+def overlaps_and_inverse_cuda(use_float64=False):
     """
-    CUDA kernel for computing overlaps using sparse CSC format for fixed_features.
-    This avoids the memory explosion from densifying sparse matrices.
+    Combined CUDA kernel computing both overlaps and inverse_overlaps in one pass.
+    Uses sparse CSC format and two-pointer merge algorithm.
+
+    Parameters:
+        use_float64: If True, use double precision. If False (default), use float32.
+
+    This is more efficient than two separate kernels because:
+    - Sparse matrix data is read from GPU memory only once
+    - Single kernel launch instead of two
+    - Single two-pointer traversal computes both outputs
     """
-    kernel_code = r"""
+    # Select types based on precision
+    dtype_cuda = "double" if use_float64 else "float"
+    min_func = "fmin" if use_float64 else "fminf"
+    suffix = "" if use_float64 else "f"
+
+    kernel_code = f"""
     extern "C" __global__
-    void compute_overlaps_sparse(const float* ff_data,
-                                const int* ff_indices,
-                                const int* ff_indptr,
-                                const float* gs_data,
-                                const int* gs_indices,
-                                const int* gs_indptr,
-                                float* overlaps,
-                                int n_fixed_features,
-                                int n_features) {
+    void compute_overlaps_and_inverse_sparse(
+        const {dtype_cuda}* ff_data,
+        const int* ff_indices,
+        const int* ff_indptr,
+        const {dtype_cuda}* gs_data,
+        const int* gs_indices,
+        const int* gs_indptr,
+        {dtype_cuda}* overlaps,
+        {dtype_cuda}* inverse_overlaps,
+        int n_fixed_features,
+        int n_features) {{
+
         int i = blockIdx.x * blockDim.x + threadIdx.x;  // fixed_feature index
         int j = blockIdx.y * blockDim.y + threadIdx.y;  // feature index
 
         if (i >= n_fixed_features || j >= n_features) return;
 
-        float sum = 0.0f;
-
-        // Get sparse column ranges for both matrices
+        // Get column ranges for CSC format
         int ff_start = ff_indptr[i];
         int ff_end = ff_indptr[i + 1];
         int gs_start = gs_indptr[j];
         int gs_end = gs_indptr[j + 1];
 
-        // Two-pointer merge algorithm to find overlapping rows
+        // Initialize accumulators
+        {dtype_cuda} overlap_sum = 0.0{suffix};
+        {dtype_cuda} inverse_overlap_sum = 0.0{suffix};
+
+        // Two-pointer merge algorithm
         int ff_ptr = ff_start;
         int gs_ptr = gs_start;
 
-        while (ff_ptr < ff_end && gs_ptr < gs_end) {
+        while (ff_ptr < ff_end && gs_ptr < gs_end) {{
             int ff_row = ff_indices[ff_ptr];
             int gs_row = gs_indices[gs_ptr];
 
-            if (ff_row == gs_row) {
-                // Both matrices have values at this row
-                float ff_val = ff_data[ff_ptr];
-                float gs_val = gs_data[gs_ptr];
-                sum += fminf(ff_val, gs_val);
+            if (ff_row == gs_row) {{
+                // Case 1: Both non-zero at this row
+                {dtype_cuda} ff_val = ff_data[ff_ptr];
+                {dtype_cuda} gs_val = gs_data[gs_ptr];
+                overlap_sum += {min_func}(ff_val, gs_val);
+                inverse_overlap_sum += {min_func}(1.0{suffix} - ff_val, gs_val);
                 ff_ptr++;
                 gs_ptr++;
-            } else if (ff_row < gs_row) {
+            }} else if (ff_row < gs_row) {{
+                // Case 2: ff non-zero, gs zero - no contribution to either
                 ff_ptr++;
-            } else {
+            }} else {{
+                // Case 3: ff zero, gs non-zero
+                // overlap: min(0, gs_val) = 0, no contribution
+                // inverse_overlap: min(1-0, gs_val) = gs_val
+                inverse_overlap_sum += gs_data[gs_ptr];
                 gs_ptr++;
-            }
-        }
+            }}
+        }}
 
-        overlaps[i * n_features + j] = sum;
-    }
-    """
-
-    module = xp.RawModule(code=kernel_code)
-    return module.get_function("compute_overlaps_sparse")
-
-
-def inverse_overlaps_sparse_cuda():
-    """
-    CUDA kernel for computing inverse overlaps: min(1-ff, gs).
-    Uses sparse representation to avoid densification.
-    Key insight: min(1-ff, gs) = gs - min(ff, gs) when ff > 0, or gs when ff = 0
-    So we compute: sum_all_gs_nonzeros(gs) - sum_overlaps(ff, gs) + corrections
-    """
-    kernel_code = r"""
-    extern "C" __global__
-    void compute_inverse_overlaps_sparse(const float* ff_data,
-                                        const int* ff_indices,
-                                        const int* ff_indptr,
-                                        const float* gs_data,
-                                        const int* gs_indices,
-                                        const int* gs_indptr,
-                                        const float* gs_sums,
-                                        float* inverse_overlaps,
-                                        int n_samples,
-                                        int n_fixed_features,
-                                        int n_features) {
-        int i = blockIdx.x * blockDim.x + threadIdx.x;  // fixed_feature index
-        int j = blockIdx.y * blockDim.y + threadIdx.y;  // feature index
-
-        if (i >= n_fixed_features || j >= n_features) return;
-
-        // Strategy: min(1-ff, gs) at each position
-        // For positions where gs=0: contributes 0
-        // For positions where gs>0, ff=0: contributes gs  (1-0=1, min(1,gs)=gs)
-        // For positions where gs>0, ff>0: contributes min(1-ff, gs)
-
-        float sum = 0.0f;
-
-        int ff_start = ff_indptr[i];
-        int ff_end = ff_indptr[i + 1];
-        int gs_start = gs_indptr[j];
-        int gs_end = gs_indptr[j + 1];
-
-        int ff_ptr = ff_start;
-        int gs_ptr = gs_start;
-
-        // Iterate through gs nonzeros
-        while (gs_ptr < gs_end) {
-            int gs_row = gs_indices[gs_ptr];
-            float gs_val = gs_data[gs_ptr];
-
-            // Find if ff has a value at this row
-            float ff_val = 0.0f;
-            while (ff_ptr < ff_end && ff_indices[ff_ptr] < gs_row) {
-                ff_ptr++;
-            }
-
-            if (ff_ptr < ff_end && ff_indices[ff_ptr] == gs_row) {
-                ff_val = ff_data[ff_ptr];
-            }
-
-            // Compute min(1 - ff_val, gs_val)
-            sum += fminf(1.0f - ff_val, gs_val);
-
+        // Handle remaining gs elements (ff exhausted, so ff=0 for these rows)
+        while (gs_ptr < gs_end) {{
+            inverse_overlap_sum += gs_data[gs_ptr];
             gs_ptr++;
-        }
+        }}
 
-        inverse_overlaps[i * n_features + j] = sum;
-    }
+        // Store results
+        int idx = i * n_features + j;
+        overlaps[idx] = overlap_sum;
+        inverse_overlaps[idx] = inverse_overlap_sum;
+    }}
     """
 
     module = xp.RawModule(code=kernel_code)
-    return module.get_function("compute_inverse_overlaps_sparse")
+    return module.get_function("compute_overlaps_and_inverse_sparse")
 
 @njit(parallel=True)
-def overlaps_cpu_parallel(fixed_features, data, indices, indptr, n_fixed_features, n_features):
+def overlaps_cpu_parallel(fixed_features, data, indices, indptr, n_fixed_features, n_features, use_float64=False):
     """
     Compute overlaps between fixed features and sparse matrix data.
+
+    Parameters:
+        use_float64: If True, use float64 output. If False (default), use float32.
     """
-    # NOTE: To exactly recreate original code, this needs to be calculated into 32-bits
-    # In the original code, this was then upcast to 64 later, but still resulted in 0s where expected
-    # Calculating this in 64 bits directly will not lead to the same 0s in very very few edge cases
-    overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
+    if use_float64:
+        overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float64)
+    else:
+        overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
     # Parallelize over the outer loop (fixed features)
     for i in prange(n_fixed_features):
         for j in range(n_features):
@@ -734,10 +705,96 @@ def overlaps_cpu_parallel(fixed_features, data, indices, indptr, n_fixed_feature
 
 
 @njit(parallel=True)
+def _overlaps_and_inverse_sparse_f32(
+    ff_data, ff_indices, ff_indptr,
+    gs_data, gs_indices, gs_indptr,
+    n_samples, n_fixed_features, n_features,
+):
+    """Float32 version of overlaps_and_inverse_sparse."""
+    overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
+    inverse_overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
+
+    for i in prange(n_fixed_features):
+        ff_start = ff_indptr[i]
+        ff_end = ff_indptr[i + 1]
+        for j in range(n_features):
+            gs_start = gs_indptr[j]
+            gs_end = gs_indptr[j + 1]
+            overlap_sum = np.float32(0.0)
+            inverse_overlap_sum = np.float32(0.0)
+            ff_ptr = ff_start
+            gs_ptr = gs_start
+            while ff_ptr < ff_end and gs_ptr < gs_end:
+                ff_row = ff_indices[ff_ptr]
+                gs_row = gs_indices[gs_ptr]
+                if ff_row == gs_row:
+                    ff_val = ff_data[ff_ptr]
+                    gs_val = gs_data[gs_ptr]
+                    overlap_sum += min(ff_val, gs_val)
+                    inverse_overlap_sum += min(np.float32(1.0) - ff_val, gs_val)
+                    ff_ptr += 1
+                    gs_ptr += 1
+                elif ff_row < gs_row:
+                    ff_ptr += 1
+                else:
+                    inverse_overlap_sum += gs_data[gs_ptr]
+                    gs_ptr += 1
+            while gs_ptr < gs_end:
+                inverse_overlap_sum += gs_data[gs_ptr]
+                gs_ptr += 1
+            overlaps[i, j] = overlap_sum
+            inverse_overlaps[i, j] = inverse_overlap_sum
+    return overlaps, inverse_overlaps
+
+
+@njit(parallel=True)
+def _overlaps_and_inverse_sparse_f64(
+    ff_data, ff_indices, ff_indptr,
+    gs_data, gs_indices, gs_indptr,
+    n_samples, n_fixed_features, n_features,
+):
+    """Float64 version of overlaps_and_inverse_sparse."""
+    overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float64)
+    inverse_overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float64)
+
+    for i in prange(n_fixed_features):
+        ff_start = ff_indptr[i]
+        ff_end = ff_indptr[i + 1]
+        for j in range(n_features):
+            gs_start = gs_indptr[j]
+            gs_end = gs_indptr[j + 1]
+            overlap_sum = 0.0
+            inverse_overlap_sum = 0.0
+            ff_ptr = ff_start
+            gs_ptr = gs_start
+            while ff_ptr < ff_end and gs_ptr < gs_end:
+                ff_row = ff_indices[ff_ptr]
+                gs_row = gs_indices[gs_ptr]
+                if ff_row == gs_row:
+                    ff_val = ff_data[ff_ptr]
+                    gs_val = gs_data[gs_ptr]
+                    overlap_sum += min(ff_val, gs_val)
+                    inverse_overlap_sum += min(1.0 - ff_val, gs_val)
+                    ff_ptr += 1
+                    gs_ptr += 1
+                elif ff_row < gs_row:
+                    ff_ptr += 1
+                else:
+                    inverse_overlap_sum += gs_data[gs_ptr]
+                    gs_ptr += 1
+            while gs_ptr < gs_end:
+                inverse_overlap_sum += gs_data[gs_ptr]
+                gs_ptr += 1
+            overlaps[i, j] = overlap_sum
+            inverse_overlaps[i, j] = inverse_overlap_sum
+    return overlaps, inverse_overlaps
+
+
 def overlaps_and_inverse_sparse(
-    ff_data, ff_indices, ff_indptr,      # Fixed features CSC components
-    gs_data, gs_indices, gs_indptr,      # Global scaled matrix CSC components
-    n_samples, n_fixed_features, n_features
+    ff_data, ff_indices, ff_indptr,
+    gs_data, gs_indices, gs_indptr,
+    n_samples, n_fixed_features, n_features,
+    use_float64=False
 ):
     """
     Compute overlaps and inverse_overlaps using two-pointer merge on sparse matrices.
@@ -752,76 +809,23 @@ def overlaps_and_inverse_sparse(
         n_samples: Number of samples (rows)
         n_fixed_features: Number of fixed features (columns in fixed_features)
         n_features: Number of features (columns in global_scaled_matrix)
+        use_float64: If True, use float64 output. If False (default), use float32.
 
     Returns:
         (overlaps, inverse_overlaps): Both shaped (n_fixed_features, n_features)
     """
-    # Initialize output arrays
-    overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
-    inverse_overlaps = np.zeros((n_fixed_features, n_features), dtype=np.float32)
-
-    # Step 3: Outer loop - parallelize over fixed features
-    for i in prange(n_fixed_features):
-        # Get the start and end indices for column i of fixed_features
-        ff_start = ff_indptr[i]
-        ff_end = ff_indptr[i + 1]
-
-        # Step 4: Middle loop - iterate over all features
-        for j in range(n_features):
-            # Get the start and end indices for column j of global_scaled_matrix
-            gs_start = gs_indptr[j]
-            gs_end = gs_indptr[j + 1]
-
-            # Initialize accumulators
-            overlap_sum = 0.0
-            inverse_overlap_sum = 0.0
-
-            # Step 5: Two-pointer merge algorithm
-            ff_ptr = ff_start
-            gs_ptr = gs_start
-
-            while ff_ptr < ff_end and gs_ptr < gs_end:
-                ff_row = ff_indices[ff_ptr]
-                gs_row = gs_indices[gs_ptr]
-
-                if ff_row == gs_row:
-                    # Case 3: Both non-zero
-                    ff_val = ff_data[ff_ptr]
-                    gs_val = gs_data[gs_ptr]
-                    overlap_sum += min(ff_val, gs_val)
-                    inverse_overlap_sum += min(1.0 - ff_val, gs_val)
-                    ff_ptr += 1
-                    gs_ptr += 1
-                elif ff_row < gs_row:
-                    # ff has non-zero at this row, but gs doesn't (gs=0)
-                    # For overlaps: min(ff_val, 0) = 0, no contribution
-                    # For inverse_overlaps: min(1-ff_val, 0) = 0, no contribution
-                    ff_ptr += 1
-                else:  # ff_row > gs_row
-                    # Case 2: ff=0, gs≠0
-                    gs_val = gs_data[gs_ptr]
-                    # For overlaps: min(0, gs_val) = 0, no contribution
-                    # For inverse_overlaps: min(1-0, gs_val) = gs_val
-                    inverse_overlap_sum += gs_val
-                    gs_ptr += 1
-
-            # Step 6: Handle remaining elements
-            # If ff_ptr exhausted but gs_ptr hasn't, those are gs≠0, ff=0 cases
-            while gs_ptr < gs_end:
-                gs_val = gs_data[gs_ptr]
-                inverse_overlap_sum += gs_val
-                gs_ptr += 1
-
-            # If gs_ptr exhausted but ff_ptr hasn't, those are ff≠0, gs=0 cases
-            # For overlaps: min(ff_val, 0) = 0
-            # For inverse_overlaps: min(1-ff_val, 0) = 0
-            # So no contribution, we can skip
-
-            # Store results
-            overlaps[i, j] = overlap_sum
-            inverse_overlaps[i, j] = inverse_overlap_sum
-
-    return overlaps, inverse_overlaps
+    if use_float64:
+        return _overlaps_and_inverse_sparse_f64(
+            ff_data, ff_indices, ff_indptr,
+            gs_data, gs_indices, gs_indptr,
+            n_samples, n_fixed_features, n_features,
+        )
+    else:
+        return _overlaps_and_inverse_sparse_f32(
+            ff_data, ff_indices, ff_indptr,
+            gs_data, gs_indices, gs_indptr,
+            n_samples, n_fixed_features, n_features,
+        )
 
 
 def calc_ESSs_chunked(
@@ -2321,6 +2325,8 @@ def identify_max_ESSs_compute_overlaps_batch(
     """
     n_fixed_features = fixed_features.shape[1] if fixed_features.shape[1] > 1 else len(sort_orders)
     n_clusters = sort_orders.shape[1]
+    use_float64 = (backend.dtype == np.float64)
+    np_dtype = np.float64 if use_float64 else np.float32
 
     if USING_GPU:
         # Use CUDA kernel for GPU processing
@@ -2331,20 +2337,22 @@ def identify_max_ESSs_compute_overlaps_batch(
             sample_cardinality,
             n_fixed_features,
             n_clusters,
+            use_float64=use_float64,
         )
     else:
         # Call numba-accelerated function for rare vectorised CPU use
         overlaps, inverse_overlaps = identify_max_ESSs_overlaps_numba(
-            fixed_features.data.astype(np.float32),
+            fixed_features.data.astype(np_dtype),
             fixed_features.indices.astype(np.int32),
             fixed_features.indptr.astype(np.int32),
-            secondary_features.data.astype(np.float32),
+            secondary_features.data.astype(np_dtype),
             secondary_features.indices.astype(np.int32),
             secondary_features.indptr.astype(np.int32),
             sort_orders.astype(np.int32).ravel(),
             sample_cardinality,
             n_fixed_features,
             n_clusters,
+            use_float64=use_float64,
         )
         # Convert back to xp arrays if needed
         if xp != np:
@@ -2400,6 +2408,7 @@ def identify_max_ESSs_overlaps_numba(
     n_samples,
     n_fixed_features,
     n_clusters,
+    use_float64=False,
 ):
     """
     Numba-accelerated CPU version for computing overlaps with per-feature sort orders.
@@ -2414,13 +2423,18 @@ def identify_max_ESSs_overlaps_numba(
         Secondary features in CSC sparse format
     sort_orders : array (n_fixed_features × n_clusters, flattened)
         Per-feature sort orders for reordering secondary features
-    overlaps, inverse_overlaps : arrays (n_fixed_features × n_clusters)
-        Output arrays (modified in-place)
     n_samples, n_fixed_features, n_clusters : int
         Matrix dimensions
+    use_float64 : bool
+        If True, use float64 output. If False (default), use float32.
     """
-    overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
-    inverse_overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
+    # Initialize output arrays based on precision setting
+    if use_float64:
+        overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float64)
+        inverse_overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float64)
+    else:
+        overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
+        inverse_overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
     # Parallel loop over fixed features and clusters
     for ff_idx in prange(n_fixed_features):
         for cumsum_idx in range(n_clusters):
@@ -2466,27 +2480,37 @@ def identify_max_ESSs_overlaps_cuda(
     sample_cardinality,
     n_fixed_features,
     n_clusters,
+    use_float64=False,
 ):
     """
     CUDA kernel for computing overlaps with per-feature sort orders and cumulative sums.
     This kernel computes min(ff[i], cumsum(sf[:, sort_order[i]])[:, j]) for each i, j combination.
+
+    Parameters:
+        use_float64: If True, use double precision. If False (default), use float32.
     """
-    kernel_code = r"""
+    # Select types based on precision
+    dtype_cuda = "double" if use_float64 else "float"
+    min_func = "fmin" if use_float64 else "fminf"
+    suffix = "" if use_float64 else "f"
+    xp_dtype = xp.float64 if use_float64 else xp.float32
+
+    kernel_code = f"""
     extern "C" __global__
     void compute_max_esss_overlaps(
-        const float* ff_data,
+        const {dtype_cuda}* ff_data,
         const int* ff_indices,
         const int* ff_indptr,
-        const float* sf_data,
+        const {dtype_cuda}* sf_data,
         const int* sf_indices,
         const int* sf_indptr,
         const int* sort_orders,
-        float* overlaps,
-        float* inverse_overlaps,
+        {dtype_cuda}* overlaps,
+        {dtype_cuda}* inverse_overlaps,
         int n_samples,
         int n_fixed_features,
         int n_clusters
-    ) {
+    ) {{
         int ff_idx = blockIdx.x * blockDim.x + threadIdx.x;  // fixed feature index
         int cumsum_idx = blockIdx.y * blockDim.y + threadIdx.y;  // cumulative cluster index
 
@@ -2496,24 +2520,24 @@ def identify_max_ESSs_overlaps_cuda(
         int ff_start = ff_indptr[ff_idx];
         int ff_end = ff_indptr[ff_idx + 1];
 
-        float overlap = 0.0f;
-        float inverse_overlap = 0.0f;
+        {dtype_cuda} overlap = 0.0{suffix};
+        {dtype_cuda} inverse_overlap = 0.0{suffix};
 
         // For each sample (row)
-        for (int sample = 0; sample < n_samples; sample++) {
+        for (int sample = 0; sample < n_samples; sample++) {{
             // Get fixed feature value at this sample
-            float ff_val = 0.0f;
-            for (int ptr = ff_start; ptr < ff_end; ptr++) {
-                if (ff_indices[ptr] == sample) {
+            {dtype_cuda} ff_val = 0.0{suffix};
+            for (int ptr = ff_start; ptr < ff_end; ptr++) {{
+                if (ff_indices[ptr] == sample) {{
                     ff_val = ff_data[ptr];
                     break;
-                }
-            }
+                }}
+            }}
 
             // Compute cumulative sum of secondary features up to cumsum_idx
             // using this fixed feature's sort order
-            float sf_cumsum = 0.0f;
-            for (int k = 0; k <= cumsum_idx; k++) {
+            {dtype_cuda} sf_cumsum = 0.0{suffix};
+            for (int k = 0; k <= cumsum_idx; k++) {{
                 // Get the cluster index from sort_order
                 int cluster_idx = sort_orders[ff_idx * n_clusters + k];
 
@@ -2521,31 +2545,30 @@ def identify_max_ESSs_overlaps_cuda(
                 int sf_start = sf_indptr[cluster_idx];
                 int sf_end = sf_indptr[cluster_idx + 1];
 
-                for (int ptr = sf_start; ptr < sf_end; ptr++) {
-                    if (sf_indices[ptr] == sample) {
+                for (int ptr = sf_start; ptr < sf_end; ptr++) {{
+                    if (sf_indices[ptr] == sample) {{
                         sf_cumsum += sf_data[ptr];
                         break;
-                    }
-                }
-            }
+                    }}
+                }}
+            }}
 
             // Accumulate min(ff, sf_cumsum) for overlap
-            overlap += fminf(ff_val, sf_cumsum);
+            overlap += {min_func}(ff_val, sf_cumsum);
 
             // Accumulate min(1-ff, sf_cumsum) for inverse overlap
-            // Assuming ff_val is in [0, 1] range after scaling
-            inverse_overlap += fminf(1.0f - ff_val, sf_cumsum);
-        }
+            inverse_overlap += {min_func}(1.0{suffix} - ff_val, sf_cumsum);
+        }}
 
         overlaps[ff_idx * n_clusters + cumsum_idx] = overlap;
         inverse_overlaps[ff_idx * n_clusters + cumsum_idx] = inverse_overlap;
-    }
+    }}
     """
     module = xp.RawModule(code=kernel_code)
     kernel = module.get_function("compute_max_esss_overlaps")
-    # Prepare arrays
-    overlaps = xp.zeros((n_fixed_features, n_clusters), dtype=xp.float32)
-    inverse_overlaps = xp.zeros((n_fixed_features, n_clusters), dtype=xp.float32)
+    # Prepare arrays with configured precision
+    overlaps = xp.zeros((n_fixed_features, n_clusters), dtype=xp_dtype)
+    inverse_overlaps = xp.zeros((n_fixed_features, n_clusters), dtype=xp_dtype)
     # Convert to CSC format and ensure contiguous
     ff_csc = fixed_features.tocsc()
     sf_csc = secondary_features.tocsc()
@@ -2559,10 +2582,10 @@ def identify_max_ESSs_overlaps_cuda(
         grid,
         block,
         (
-            ff_csc.data.astype(xp.float32),
+            ff_csc.data.astype(xp_dtype),
             ff_csc.indices,
             ff_csc.indptr,
-            sf_csc.data.astype(xp.float32),
+            sf_csc.data.astype(xp_dtype),
             sf_csc.indices,
             sf_csc.indptr,
             sort_orders.astype(xp.int32).ravel(),

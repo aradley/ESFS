@@ -31,6 +31,9 @@ classifiers=[
 gpu = [
     "cupy-cuda12x"
 ]
+mlx = [
+    "mlx>=0.20.0"
+]
 
 [tool.black]
 line-length = 100
