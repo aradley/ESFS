@@ -8,6 +8,10 @@ Go to the Example_Workflows folder to see some example workflows that you may ad
 
 Datasets for reproducing the example workflows may be found at the following Mendeley Data repsitory - 
 
+## Software overview
+
+![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
+
 ### Installation
 Either install this repository directly via:
 
@@ -24,10 +28,6 @@ pip install .
 ```
 
 You should do this within an environment, using something like `uv`, `venv`, or `conda`.
-
-## Software overview
-
-![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
 
 ## GPU acceleration (NVIDIA/CUDA)
 
