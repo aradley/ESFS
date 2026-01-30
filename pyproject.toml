@@ -6,40 +6,62 @@ authors = [
     { name = "Arthur Radley", email = "arthur_radley@hotmail.co.uk"}
 ]
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
-    "anndata==0.11.4",
-    "numpy==1.26.4",
-    "pandas==2.2.3",
-    "scipy==1.11.4",
-    "matplotlib==3.7.3",
-    "scanpy[leiden]==1.11.0",
-    "scikit-learn==1.5.2",
-    "plotly[express]==6.5.1",
-    "multiprocess==0.70.17",
-    "p-tqdm==1.4.2",
-    "umap-learn==0.5.7",
-    "ipython==8.12.3",
-    "zarr<3"
+    # Core scientific stack
+    "numpy>=1.26",
+    "scipy>=1.11,<2.0",
+    "pandas>=2.0,<3.0",
+
+    # Visualization
+    "matplotlib>=3.7,<4.0",
+    "plotly>=5.0,<7.0",
+
+    # Single-cell ecosystem (tighter pins - API changes frequently)
+    "anndata>=0.10,<0.12",
+    "scanpy[leiden]>=1.10,<2.0",
+
+    # ML/Analysis
+    "scikit-learn>=1.4,<2.0",
+    "umap-learn>=0.5,<0.6",
+
+    # Parallel processing
+    "numba>=0.59,<1.0",
+    "multiprocess>=0.70,<0.80",
+    "p-tqdm>=1.4,<2.0",
+    "tqdm>=4.0",
+
+    # Storage
+    "zarr>=2.16,<3.0",
 ]
 classifiers=[
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
 
 [project.optional-dependencies]
 gpu = [
-    "cupy-cuda12x"
+    "cupy-cuda12x>=13.0,<15.0",
 ]
 mlx = [
-    "mlx>=0.20.0"
+    "mlx>=0.20,<1.0",
+]
+dev = [
+    "ipython>=8.0",
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.3",
 ]
 
-[tool.black]
+[tool.ruff]
 line-length = 100
+target-version = "py311"
 
-[tool.isort]
-profile = "black"
+[tool.ruff.lint]
+select = ["E", "F", "I"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

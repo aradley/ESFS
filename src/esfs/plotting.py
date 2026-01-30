@@ -2,6 +2,7 @@ from typing import Optional
 import warnings
 
 from joblib import Parallel, delayed
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
@@ -84,11 +85,20 @@ def knn_smooth_gene_expression(
     if log_scale:
         full_X = np.log2(full_X + 1)
 
-    print(f"Smoothing expression matrix using mean over {knn} neighbors...")
+    # Smooth expression matrix using mean over k neighbors, with progress bar
+    n_cells = neighbors.shape[0]
+    n_genes = full_X.shape[1]
+    smoothed_expression = np.zeros((n_cells, n_genes), dtype=np.float32)
 
-    smoothed_expression = np.array(
-        [np.mean(full_X[neighbor_idx], axis=0) for neighbor_idx in neighbors]
-    )
+    # Process in chunks (20 chunks = 5% updates)
+    chunk_size = max(1, (n_cells + 19) // 20)
+
+    with tqdm(total=n_cells, desc="Smoothing expression", unit="cells") as pbar:
+        for chunk_start in range(0, n_cells, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, n_cells)
+            for i in range(chunk_start, chunk_end):
+                smoothed_expression[i] = np.mean(full_X[neighbors[i]], axis=0)
+            pbar.update(chunk_end - chunk_start)
     adata.layers["Smoothed_Expression"] = _convert_sparse_array(
         smoothed_expression.astype(np.float32), to_scipy=True
     )

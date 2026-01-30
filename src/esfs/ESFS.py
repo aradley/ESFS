@@ -299,26 +299,27 @@ def parallel_calc_es_matrices(
         xp.get_default_memory_pool().free_all_blocks()
     return adata
 
-def get_num_cores(use_cores: int):
-    # Check current backend state (read from backend module, not stale module-level vars)
-    if backend.using_gpu:
-        print("Compute: CUDA/CuPy (NVIDIA GPU)")
-        return use_cores  # use_cores is ignored for GPU but return it anyway
-    elif backend.using_mlx:
-        print("Compute: MLX/Metal (Apple Silicon GPU)")
-        return use_cores  # use_cores is ignored for GPU but return it anyway
-
-    # CPU backend: show cores information
+def get_num_cores(use_cores: int, silent: bool = False):
+    # Get available cores (needed for all backends in case of CPU fallback functions)
     cores_avail = multiprocess.cpu_count()
-    # Special check if we're running in a SLURM environment, where CPU count does not match CPUs allocated
+    # Special check if we're running in a SLURM environment
     if "SLURM_CPUS_ON_NODE" in os.environ:
         cores_avail = min(cores_avail, int(os.environ["SLURM_CPUS_ON_NODE"]))
-    print("Compute: CPU (NumPy/Numba)")
-    print("  Cores Available: " + str(cores_avail))
     # If user sets -1, use all avail but one core (arbitrary buffer)
     if use_cores == -1:
         use_cores = max(cores_avail - 1, 1)
-    print("  Cores Used: " + str(use_cores))
+
+    # Print backend info (unless silent)
+    if not silent:
+        if backend.using_gpu:
+            print("Compute: CUDA/CuPy (NVIDIA GPU)")
+        elif backend.using_mlx:
+            print("Compute: MLX/Metal (Apple Silicon GPU)")
+        else:
+            print("Compute: CPU (NumPy/Numba)")
+            print("  Cores Available: " + str(cores_avail))
+            print("  Cores Used: " + str(use_cores))
+
     return use_cores
 
 def nanmaximum(arr1, arr2):
@@ -1893,14 +1894,33 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
         "If progress bar freezes consider increasing system memory or reducing number of cores used with the 'use_cores' parameter as you may have hit a memory ceiling for your machine."
     )
     with np.errstate(divide="ignore", invalid="ignore"):
-        if USING_GPU:
-            # Use vectorized version for GPU
-            all_ESSs, all_EPs = identify_max_ESSs_vec(
-                feature_inds,
-                secondary_features,
-                sorted_SGs_idxs,
-                chunksize=chunksize
-            )
+        if USING_GPU or USING_MLX:
+            # Process genes in chunks with progress bar (default: 20 chunks = 5% increments)
+            n_genes = len(feature_inds)
+            gene_chunk_size = chunksize if chunksize is not None else max(1, (n_genes + 19) // 20)
+
+            all_ESSs_chunks = []
+            all_EPs_chunks = []
+
+            with tqdm(total=n_genes, desc="Finding max ESSs", unit="genes") as pbar:
+                for chunk_start in range(0, n_genes, gene_chunk_size):
+                    chunk_end = min(chunk_start + gene_chunk_size, n_genes)
+                    chunk_gene_inds = feature_inds[chunk_start:chunk_end]
+                    chunk_sorted_SGs = sorted_SGs_idxs[chunk_start:chunk_end]
+
+                    chunk_ESSs, chunk_EPs = identify_max_ESSs_vec(
+                        chunk_gene_inds,
+                        secondary_features,
+                        chunk_sorted_SGs,
+                        chunksize=None,
+                    )
+                    all_ESSs_chunks.append(chunk_ESSs)
+                    all_EPs_chunks.append(chunk_EPs)
+                    pbar.update(chunk_end - chunk_start)
+
+            # Concatenate results
+            all_ESSs = xp.concatenate(all_ESSs_chunks, axis=0)
+            all_EPs = xp.concatenate(all_EPs_chunks, axis=0)
             # Convert to list of results for compatibility with downstream code
             results = [(all_ESSs[i], all_EPs[i]) for i in range(len(feature_inds))]
         elif use_cores == 1:
@@ -1940,6 +1960,7 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
                 secondary_features[:, top_score_columns_combinations[i]].sum(axis=1).reshape(-1)
             )
         else:
+            # MLX and CPU both use scipy sparse which returns matrix, need .A
             top_score_secondary_features[:, i] = (
                 secondary_features[:, top_score_columns_combinations[i]].sum(axis=1).A.reshape(-1)
             )
@@ -2069,6 +2090,7 @@ def identify_max_ESSs_get_overlap_info(
     if USING_GPU:
         overlaps = sub_secondary_features.minimum(B.tocsr()).sum(axis=0)[0]
     else:
+        # MLX and CPU both use scipy sparse which returns matrix, need .A
         overlaps = sub_secondary_features.minimum(B).sum(axis=0).A[0]
     #
     inverse_fixed_feature = xp.max(fixed_feature) - fixed_feature
@@ -2084,6 +2106,7 @@ def identify_max_ESSs_get_overlap_info(
     if USING_GPU:
         inverse_overlaps = sub_secondary_features.minimum(B.tocsr()).sum(axis=0)[0]
     else:
+        # MLX and CPU both use scipy sparse which returns matrix, need .A
         inverse_overlaps = sub_secondary_features.minimum(B).sum(axis=0).A[0]
     ## If FF is observed in it's minority state, use the following 4 steps to caclulate overlaps with every other feature
     if fixed_feature_cardinality < (sample_cardinality / 2):
@@ -2196,6 +2219,7 @@ def identify_max_ESSs_vec(FF_inds, secondary_features, sorted_SGs_idxs, chunksiz
         if USING_GPU:
             fixed_features_cardinality = fixed_features.sum(axis=0).flatten()
         else:
+            # MLX and CPU both use scipy sparse which returns matrix, need .A
             fixed_features_cardinality = fixed_features.sum(axis=0).A.flatten()
     else:
         fixed_features_cardinality = fixed_features.sum(axis=0)
@@ -2205,8 +2229,8 @@ def identify_max_ESSs_vec(FF_inds, secondary_features, sorted_SGs_idxs, chunksiz
         fixed_feature_minority_states[idxs] = sample_cardinality - fixed_features_cardinality[idxs]
     ## Get sort orders for all features (delete last cluster from each)
     all_sort_orders = xp.zeros((n_features, n_clusters), dtype=xp.int32)
-    for i, FF_ind_global in enumerate(FF_inds):
-        all_sort_orders[i] = xp.delete(sorted_SGs_idxs[FF_ind_global, :], -1)
+    for i in range(n_features):
+        all_sort_orders[i] = xp.delete(sorted_SGs_idxs[i, :], -1)
     ## Calculate secondary feature sums and minority states for all features
     # Each feature has a unique sort order, so we need arrays for each
     all_SF_sums = xp.zeros((n_features, n_clusters), dtype=backend.dtype)
@@ -2397,6 +2421,93 @@ def identify_max_ESSs_compute_overlaps_batch(
 
 
 @njit(parallel=True, cache=True)
+def _identify_max_ESSs_overlaps_numba_f32(
+    ff_data,
+    ff_indices,
+    ff_indptr,
+    sf_data,
+    sf_indices,
+    sf_indptr,
+    sort_orders,
+    n_samples,
+    n_fixed_features,
+    n_clusters,
+):
+    """Float32 version of the Numba overlap computation."""
+    overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
+    inverse_overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
+    for ff_idx in prange(n_fixed_features):
+        for cumsum_idx in range(n_clusters):
+            ff_start = ff_indptr[ff_idx]
+            ff_end = ff_indptr[ff_idx + 1]
+            overlap = np.float32(0.0)
+            inverse_overlap = np.float32(0.0)
+            for sample in range(n_samples):
+                ff_val = np.float32(0.0)
+                for ptr in range(ff_start, ff_end):
+                    if ff_indices[ptr] == sample:
+                        ff_val = ff_data[ptr]
+                        break
+                sf_cumsum = np.float32(0.0)
+                for k in range(cumsum_idx + 1):
+                    cluster_idx = sort_orders[ff_idx * n_clusters + k]
+                    sf_start = sf_indptr[cluster_idx]
+                    sf_end = sf_indptr[cluster_idx + 1]
+                    for ptr in range(sf_start, sf_end):
+                        if sf_indices[ptr] == sample:
+                            sf_cumsum += sf_data[ptr]
+                            break
+                overlap += min(ff_val, sf_cumsum)
+                inverse_overlap += min(np.float32(1.0) - ff_val, sf_cumsum)
+            overlaps[ff_idx, cumsum_idx] = overlap
+            inverse_overlaps[ff_idx, cumsum_idx] = inverse_overlap
+    return overlaps, inverse_overlaps
+
+
+@njit(parallel=True, cache=True)
+def _identify_max_ESSs_overlaps_numba_f64(
+    ff_data,
+    ff_indices,
+    ff_indptr,
+    sf_data,
+    sf_indices,
+    sf_indptr,
+    sort_orders,
+    n_samples,
+    n_fixed_features,
+    n_clusters,
+):
+    """Float64 version of the Numba overlap computation."""
+    overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float64)
+    inverse_overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float64)
+    for ff_idx in prange(n_fixed_features):
+        for cumsum_idx in range(n_clusters):
+            ff_start = ff_indptr[ff_idx]
+            ff_end = ff_indptr[ff_idx + 1]
+            overlap = 0.0
+            inverse_overlap = 0.0
+            for sample in range(n_samples):
+                ff_val = 0.0
+                for ptr in range(ff_start, ff_end):
+                    if ff_indices[ptr] == sample:
+                        ff_val = ff_data[ptr]
+                        break
+                sf_cumsum = 0.0
+                for k in range(cumsum_idx + 1):
+                    cluster_idx = sort_orders[ff_idx * n_clusters + k]
+                    sf_start = sf_indptr[cluster_idx]
+                    sf_end = sf_indptr[cluster_idx + 1]
+                    for ptr in range(sf_start, sf_end):
+                        if sf_indices[ptr] == sample:
+                            sf_cumsum += sf_data[ptr]
+                            break
+                overlap += min(ff_val, sf_cumsum)
+                inverse_overlap += min(1.0 - ff_val, sf_cumsum)
+            overlaps[ff_idx, cumsum_idx] = overlap
+            inverse_overlaps[ff_idx, cumsum_idx] = inverse_overlap
+    return overlaps, inverse_overlaps
+
+
 def identify_max_ESSs_overlaps_numba(
     ff_data,
     ff_indices,
@@ -2428,49 +2539,18 @@ def identify_max_ESSs_overlaps_numba(
     use_float64 : bool
         If True, use float64 output. If False (default), use float32.
     """
-    # Initialize output arrays based on precision setting
     if use_float64:
-        overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float64)
-        inverse_overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float64)
+        return _identify_max_ESSs_overlaps_numba_f64(
+            ff_data, ff_indices, ff_indptr,
+            sf_data, sf_indices, sf_indptr,
+            sort_orders, n_samples, n_fixed_features, n_clusters,
+        )
     else:
-        overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
-        inverse_overlaps = np.zeros((n_fixed_features, n_clusters), dtype=np.float32)
-    # Parallel loop over fixed features and clusters
-    for ff_idx in prange(n_fixed_features):
-        for cumsum_idx in range(n_clusters):
-            # Get fixed feature column range
-            ff_start = ff_indptr[ff_idx]
-            ff_end = ff_indptr[ff_idx + 1]
-            overlap = 0.0
-            inverse_overlap = 0.0
-            # For each sample (row)
-            for sample in range(n_samples):
-                # Get fixed feature value at this sample
-                ff_val = 0.0
-                for ptr in range(ff_start, ff_end):
-                    if ff_indices[ptr] == sample:
-                        ff_val = ff_data[ptr]
-                        break
-                # Compute cumulative sum of secondary features up to cumsum_idx
-                # using this fixed feature's sort order
-                sf_cumsum = 0.0
-                for k in range(cumsum_idx + 1):
-                    # Get the cluster index from sort_order
-                    cluster_idx = sort_orders[ff_idx * n_clusters + k]
-                    # Get secondary feature value at this sample for this cluster
-                    sf_start = sf_indptr[cluster_idx]
-                    sf_end = sf_indptr[cluster_idx + 1]
-                    for ptr in range(sf_start, sf_end):
-                        if sf_indices[ptr] == sample:
-                            sf_cumsum += sf_data[ptr]
-                            break
-                # Accumulate min(ff, sf_cumsum) for overlap
-                overlap += min(ff_val, sf_cumsum)
-                # Accumulate min(1-ff, sf_cumsum) for inverse overlap
-                inverse_overlap += min(1.0 - ff_val, sf_cumsum)
-            overlaps[ff_idx, cumsum_idx] = overlap
-            inverse_overlaps[ff_idx, cumsum_idx] = inverse_overlap
-    return overlaps, inverse_overlaps
+        return _identify_max_ESSs_overlaps_numba_f32(
+            ff_data, ff_indices, ff_indptr,
+            sf_data, sf_indices, sf_indptr,
+            sort_orders, n_samples, n_fixed_features, n_clusters,
+        )
 
 
 def identify_max_ESSs_overlaps_cuda(
@@ -2683,7 +2763,7 @@ def ES_FMG(
                 # print(current_score)
                 if current_score > best_score:
                     best_score = current_score
-                    print("Current highest score: " + str(best_score))
+                    print(f"\rCurrent highest score: {best_score:.6f}    ", end='', flush=True)
                     best_chosen_clusters = chosen_clusts.copy()
             else:
                 end = 1
@@ -2695,9 +2775,11 @@ def ES_FMG(
             )
             random_reheat_2 = np.random.randint(chosen_clusts.shape[0], size=reheat_num)
             chosen_clusts[random_reheat_2] = random_reheat_1
+            print()  # Move to new line to preserve the score
             print(f"Reheat number: {reheat}")
             reheat += 1
     #
+    print()  # Finalize the score line
     chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
     return (
         best_chosen_clusters,
@@ -2757,6 +2839,7 @@ def parallel_replace_clust(
     use_cores,
 ):
     replace_idxs = np.arange(N)
+    use_cores = get_num_cores(use_cores, silent=True)
     #
     pool = multiprocess.Pool(processes=use_cores)
     results = pool.map(
