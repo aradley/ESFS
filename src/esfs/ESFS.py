@@ -2695,8 +2695,14 @@ def ES_FMG(
     to calculate the ESSs of every varible/column in adata in relation to each ESS_Max feature/cluster, we can now use ES_FMG
     to identify a set of N clusters that maximally capture distinct gene expression patterns in the counts matrix of adata.
     """
-    # Get number of cores to use
-    use_cores = get_num_cores(use_cores)
+    # Get number of cores to use (silent=True because ES_FMG always uses CPU/Numba)
+    use_cores = get_num_cores(use_cores, silent=True)
+    cores_avail = multiprocess.cpu_count()
+    if "SLURM_CPUS_ON_NODE" in os.environ:
+        cores_avail = min(cores_avail, int(os.environ["SLURM_CPUS_ON_NODE"]))
+    print("Compute: CPU (Numba JIT)")
+    print("  Cores Available: " + str(cores_avail))
+    print("  Cores Used: " + str(use_cores))
     # Gene set optimisation
     if input_genes is None:
         # input_genes = xp.array(adata.var_names.tolist())
@@ -2707,7 +2713,6 @@ def ES_FMG(
         input_gene_idxs = adata.var_names.get_indexer(input_genes)
     #
     ###
-    global clust_ESSs
     clust_ESSs = np.asarray(adata.varm[secondary_features_label + "_ESSs"])[
         np.ix_(input_gene_idxs, input_gene_idxs)
     ]
@@ -2740,6 +2745,7 @@ def ES_FMG(
                     chosen_clusts,
                     current_score,
                     max_ESSs,
+                    clust_ESSs,
                     resolution,
                     use_cores=use_cores,
                 )
@@ -2782,51 +2788,272 @@ def ES_FMG(
     print()  # Finalize the score line
     chosen_pairwise_ESSs = clust_ESSs[np.ix_(chosen_clusts, chosen_clusts)]
     return (
-        best_chosen_clusters,
-        [input_genes[i] for i in best_chosen_clusters],
-        chosen_pairwise_ESSs,
+        np.asarray(best_chosen_clusters),
+        np.array([input_genes[i] for i in best_chosen_clusters]),
+        np.asarray(chosen_pairwise_ESSs),
     )
 
 
-def replace_clust(
+@njit(cache=True)
+def _replace_clust_f32(
     replace_idx,
     chosen_pairwise_ESSs,
     chosen_clusts,
     current_score,
     max_ESSs,
+    clust_ESSs,
     resolution,
 ):
-    sub_chosen_clusts = np.delete(chosen_clusts, replace_idx)
-    #
-    sub_chosen_pairwise_ESSs = np.delete(
-        chosen_pairwise_ESSs, replace_idx, axis=0
-    )  # Delete a row, which should be the cluster
-    sub_chosen_pairwise_ESSs = np.delete(sub_chosen_pairwise_ESSs, replace_idx, axis=1)
-    sub_2nd_maxs = np.max(sub_chosen_pairwise_ESSs, axis=1)
-    replacement_columns = clust_ESSs[sub_chosen_clusts, :]
-    replacement_columns[(np.arange(sub_chosen_clusts.shape[0]), sub_chosen_clusts)] = 0
-    sub_2nd_maxs = np.maximum(sub_2nd_maxs[:, np.newaxis], replacement_columns)
-    #
-    replacement_scores_1 = np.sum(
-        (max_ESSs[sub_chosen_clusts, np.newaxis] - (sub_2nd_maxs * resolution)), axis=0
-    )
-    #
-    replacement_rows = clust_ESSs[:, sub_chosen_clusts]
-    replacement_rows[(sub_chosen_clusts, np.arange(sub_chosen_clusts.shape[0]))] = 0
-    #
-    replacement_scores_2 = max_ESSs - (np.max(replacement_rows, axis=1) * resolution)
-    #
-    replacement_scores = replacement_scores_1 + replacement_scores_2
-    ###
-    changes = replacement_scores - current_score
-    changes[chosen_clusts] = -np.inf
-    max_idx = np.argmax(changes)
-    max_change = changes[max_idx]
-    # all_max_changes[i] = max_change
-    # all_max_change_idxs[i] = max_idx
-    # all_max_replacement_scores[i] = replacement_scores[max_idx]
-    #
+    """Float32 Numba-compiled version of replace_clust."""
+    n = len(chosen_clusts)
+    n_sub = n - 1
+    n_genes = clust_ESSs.shape[1]
+
+    # Build indices of non-replaced clusters (replaces np.ix_)
+    sub_indices = np.empty(n_sub, dtype=np.int64)
+    sub_chosen_clusts = np.empty(n_sub, dtype=np.int64)
+    idx = 0
+    for i in range(n):
+        if i != replace_idx:
+            sub_indices[idx] = i
+            sub_chosen_clusts[idx] = chosen_clusts[i]
+            idx += 1
+
+    # Extract submatrix manually (replaces np.ix_ indexing)
+    sub_chosen_pairwise_ESSs = np.empty((n_sub, n_sub), dtype=np.float32)
+    for i in range(n_sub):
+        for j in range(n_sub):
+            sub_chosen_pairwise_ESSs[i, j] = chosen_pairwise_ESSs[sub_indices[i], sub_indices[j]]
+
+    # Max across rows
+    sub_2nd_maxs = np.empty(n_sub, dtype=np.float32)
+    for i in range(n_sub):
+        max_val = np.float32(-np.inf)
+        for j in range(n_sub):
+            if sub_chosen_pairwise_ESSs[i, j] > max_val:
+                max_val = sub_chosen_pairwise_ESSs[i, j]
+        sub_2nd_maxs[i] = max_val
+
+    # Get replacement columns and zero diagonal, then apply maximum
+    replacement_columns = np.empty((n_sub, n_genes), dtype=np.float32)
+    for i in range(n_sub):
+        clust_idx = sub_chosen_clusts[i]
+        for j in range(n_genes):
+            val = clust_ESSs[clust_idx, j]
+            if j == clust_idx:
+                val = np.float32(0.0)
+            # Apply maximum with sub_2nd_maxs
+            if sub_2nd_maxs[i] > val:
+                replacement_columns[i, j] = sub_2nd_maxs[i]
+            else:
+                replacement_columns[i, j] = val
+
+    # replacement_scores_1
+    replacement_scores_1 = np.zeros(n_genes, dtype=np.float32)
+    for j in range(n_genes):
+        for i in range(n_sub):
+            replacement_scores_1[j] += max_ESSs[sub_chosen_clusts[i]] - (replacement_columns[i, j] * resolution)
+
+    # Get replacement rows and zero diagonal
+    replacement_rows = np.empty((n_genes, n_sub), dtype=np.float32)
+    for i in range(n_genes):
+        for j in range(n_sub):
+            replacement_rows[i, j] = clust_ESSs[i, sub_chosen_clusts[j]]
+    for j in range(n_sub):
+        replacement_rows[sub_chosen_clusts[j], j] = np.float32(0.0)
+
+    # Max across columns for each row
+    max_replacement_rows = np.empty(n_genes, dtype=np.float32)
+    for i in range(n_genes):
+        max_val = np.float32(-np.inf)
+        for j in range(n_sub):
+            if replacement_rows[i, j] > max_val:
+                max_val = replacement_rows[i, j]
+        max_replacement_rows[i] = max_val
+
+    # replacement_scores_2 and combined
+    replacement_scores = np.empty(n_genes, dtype=np.float32)
+    for j in range(n_genes):
+        replacement_scores_2 = max_ESSs[j] - (max_replacement_rows[j] * resolution)
+        replacement_scores[j] = replacement_scores_1[j] + replacement_scores_2
+
+    # Mark chosen clusters as invalid
+    for i in range(n):
+        replacement_scores[chosen_clusts[i]] = np.float32(-np.inf)
+
+    # Find max
+    max_idx = np.int64(0)
+    max_change = replacement_scores[0] - current_score
+    for j in range(1, n_genes):
+        change = replacement_scores[j] - current_score
+        if change > max_change:
+            max_change = change
+            max_idx = np.int64(j)
+
+    return np.float32(max_change), max_idx, replacement_scores[max_idx]
+
+
+@njit(cache=True)
+def _replace_clust_f64(
+    replace_idx,
+    chosen_pairwise_ESSs,
+    chosen_clusts,
+    current_score,
+    max_ESSs,
+    clust_ESSs,
+    resolution,
+):
+    """Float64 Numba-compiled version of replace_clust."""
+    n = len(chosen_clusts)
+    n_sub = n - 1
+    n_genes = clust_ESSs.shape[1]
+
+    # Build indices of non-replaced clusters (replaces np.ix_)
+    sub_indices = np.empty(n_sub, dtype=np.int64)
+    sub_chosen_clusts = np.empty(n_sub, dtype=np.int64)
+    idx = 0
+    for i in range(n):
+        if i != replace_idx:
+            sub_indices[idx] = i
+            sub_chosen_clusts[idx] = chosen_clusts[i]
+            idx += 1
+
+    # Extract submatrix manually (replaces np.ix_ indexing)
+    sub_chosen_pairwise_ESSs = np.empty((n_sub, n_sub), dtype=np.float64)
+    for i in range(n_sub):
+        for j in range(n_sub):
+            sub_chosen_pairwise_ESSs[i, j] = chosen_pairwise_ESSs[sub_indices[i], sub_indices[j]]
+
+    # Max across rows
+    sub_2nd_maxs = np.empty(n_sub, dtype=np.float64)
+    for i in range(n_sub):
+        max_val = -np.inf
+        for j in range(n_sub):
+            if sub_chosen_pairwise_ESSs[i, j] > max_val:
+                max_val = sub_chosen_pairwise_ESSs[i, j]
+        sub_2nd_maxs[i] = max_val
+
+    # Get replacement columns and zero diagonal, then apply maximum
+    replacement_columns = np.empty((n_sub, n_genes), dtype=np.float64)
+    for i in range(n_sub):
+        clust_idx = sub_chosen_clusts[i]
+        for j in range(n_genes):
+            val = clust_ESSs[clust_idx, j]
+            if j == clust_idx:
+                val = 0.0
+            # Apply maximum with sub_2nd_maxs
+            if sub_2nd_maxs[i] > val:
+                replacement_columns[i, j] = sub_2nd_maxs[i]
+            else:
+                replacement_columns[i, j] = val
+
+    # replacement_scores_1
+    replacement_scores_1 = np.zeros(n_genes, dtype=np.float64)
+    for j in range(n_genes):
+        for i in range(n_sub):
+            replacement_scores_1[j] += max_ESSs[sub_chosen_clusts[i]] - (replacement_columns[i, j] * resolution)
+
+    # Get replacement rows and zero diagonal
+    replacement_rows = np.empty((n_genes, n_sub), dtype=np.float64)
+    for i in range(n_genes):
+        for j in range(n_sub):
+            replacement_rows[i, j] = clust_ESSs[i, sub_chosen_clusts[j]]
+    for j in range(n_sub):
+        replacement_rows[sub_chosen_clusts[j], j] = 0.0
+
+    # Max across columns for each row
+    max_replacement_rows = np.empty(n_genes, dtype=np.float64)
+    for i in range(n_genes):
+        max_val = -np.inf
+        for j in range(n_sub):
+            if replacement_rows[i, j] > max_val:
+                max_val = replacement_rows[i, j]
+        max_replacement_rows[i] = max_val
+
+    # replacement_scores_2 and combined
+    replacement_scores = np.empty(n_genes, dtype=np.float64)
+    for j in range(n_genes):
+        replacement_scores_2 = max_ESSs[j] - (max_replacement_rows[j] * resolution)
+        replacement_scores[j] = replacement_scores_1[j] + replacement_scores_2
+
+    # Mark chosen clusters as invalid
+    for i in range(n):
+        replacement_scores[chosen_clusts[i]] = -np.inf
+
+    # Find max
+    max_idx = np.int64(0)
+    max_change = replacement_scores[0] - current_score
+    for j in range(1, n_genes):
+        change = replacement_scores[j] - current_score
+        if change > max_change:
+            max_change = change
+            max_idx = np.int64(j)
+
     return max_change, max_idx, replacement_scores[max_idx]
+
+
+@njit(parallel=True, cache=True)
+def _parallel_replace_clust_f32(
+    chosen_pairwise_ESSs,
+    chosen_clusts,
+    current_score,
+    max_ESSs,
+    clust_ESSs,
+    resolution,
+):
+    """Numba-parallelized version using prange (float32)."""
+    N = len(chosen_clusts)
+    all_max_changes = np.empty(N, dtype=np.float32)
+    all_max_change_idxs = np.empty(N, dtype=np.int64)
+    all_max_replacement_scores = np.empty(N, dtype=np.float32)
+
+    for replace_idx in prange(N):
+        max_change, max_idx, replacement_score = _replace_clust_f32(
+            replace_idx,
+            chosen_pairwise_ESSs,
+            chosen_clusts,
+            current_score,
+            max_ESSs,
+            clust_ESSs,
+            resolution,
+        )
+        all_max_changes[replace_idx] = max_change
+        all_max_change_idxs[replace_idx] = max_idx
+        all_max_replacement_scores[replace_idx] = replacement_score
+
+    return all_max_changes, all_max_change_idxs, all_max_replacement_scores
+
+
+@njit(parallel=True, cache=True)
+def _parallel_replace_clust_f64(
+    chosen_pairwise_ESSs,
+    chosen_clusts,
+    current_score,
+    max_ESSs,
+    clust_ESSs,
+    resolution,
+):
+    """Numba-parallelized version using prange (float64)."""
+    N = len(chosen_clusts)
+    all_max_changes = np.empty(N, dtype=np.float64)
+    all_max_change_idxs = np.empty(N, dtype=np.int64)
+    all_max_replacement_scores = np.empty(N, dtype=np.float64)
+
+    for replace_idx in prange(N):
+        max_change, max_idx, replacement_score = _replace_clust_f64(
+            replace_idx,
+            chosen_pairwise_ESSs,
+            chosen_clusts,
+            current_score,
+            max_ESSs,
+            clust_ESSs,
+            resolution,
+        )
+        all_max_changes[replace_idx] = max_change
+        all_max_change_idxs[replace_idx] = max_idx
+        all_max_replacement_scores[replace_idx] = replacement_score
+
+    return all_max_changes, all_max_change_idxs, all_max_replacement_scores
 
 
 def parallel_replace_clust(
@@ -2835,28 +3062,46 @@ def parallel_replace_clust(
     chosen_clusts,
     current_score,
     max_ESSs,
+    clust_ESSs,
     resolution,
     use_cores,
 ):
-    replace_idxs = np.arange(N)
+    """Wrapper using Numba prange (replaces multiprocessing.Pool)."""
     use_cores = get_num_cores(use_cores, silent=True)
-    #
-    pool = multiprocess.Pool(processes=use_cores)
-    results = pool.map(
-        partial(
-            replace_clust,
-            resolution=resolution,
-            chosen_pairwise_ESSs=chosen_pairwise_ESSs,
-            chosen_clusts=chosen_clusts,
-            current_score=current_score,
-            max_ESSs=max_ESSs,
-        ),
-        replace_idxs,
-    )
-    pool.close()
-    pool.join()
-    results = np.asarray(results)
-    all_max_changes = results[:, 0]
-    all_max_change_idxs = results[:, 1]
-    all_max_replacement_scores = results[:, 2]
-    return all_max_changes, all_max_change_idxs, all_max_replacement_scores
+    original_threads = get_num_threads()
+    set_num_threads(use_cores)
+
+    try:
+        # Ensure arrays are contiguous and correct dtype
+        chosen_pairwise_ESSs = np.ascontiguousarray(chosen_pairwise_ESSs)
+        chosen_clusts = np.ascontiguousarray(chosen_clusts).astype(np.int64)
+        clust_ESSs = np.ascontiguousarray(clust_ESSs)
+        max_ESSs = np.ascontiguousarray(max_ESSs)
+
+        # Dispatch based on dtype
+        if chosen_pairwise_ESSs.dtype == np.float64:
+            all_max_changes, all_max_change_idxs, all_max_replacement_scores = (
+                _parallel_replace_clust_f64(
+                    chosen_pairwise_ESSs.astype(np.float64),
+                    chosen_clusts,
+                    np.float64(current_score),
+                    max_ESSs.astype(np.float64),
+                    clust_ESSs.astype(np.float64),
+                    np.float64(resolution),
+                )
+            )
+        else:
+            all_max_changes, all_max_change_idxs, all_max_replacement_scores = (
+                _parallel_replace_clust_f32(
+                    chosen_pairwise_ESSs.astype(np.float32),
+                    chosen_clusts,
+                    np.float32(current_score),
+                    max_ESSs.astype(np.float32),
+                    clust_ESSs.astype(np.float32),
+                    np.float32(resolution),
+                )
+            )
+
+        return all_max_changes, all_max_change_idxs, all_max_replacement_scores
+    finally:
+        set_num_threads(original_threads)

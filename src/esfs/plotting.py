@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional, Union
 import warnings
 
 from joblib import Parallel, delayed
@@ -332,7 +332,7 @@ def get_gene_cluster_cell_UMAPs(
     n_neighbors: int,
     min_dist: float,
     log_transformed: bool,
-    specific_cluster: Optional[int] = None,
+    specific_cluster: Optional[Union[int, List[int]]] = None,
     metric: str = "correlation",
     random_state: Optional[int] = None,
     **kwargs,
@@ -341,16 +341,30 @@ def get_gene_cluster_cell_UMAPs(
         "Generating the cell UMAP embeddings for each cluster of genes from the previous function."
     )
     if specific_cluster is None:
-        unique_gene_clust_labels = np.unique(gene_clust_labels)
+        unique_gene_clust_labels = list(np.unique(gene_clust_labels))
+    elif isinstance(specific_cluster, (list, np.ndarray)):
+        # Combine multiple clusters into one UMAP
+        unique_gene_clust_labels = [specific_cluster]
     else:
         unique_gene_clust_labels = [specific_cluster]
     # Create containers for the selected genes and embeddings
     gene_cluster_selected_genes = []
     gene_cluster_embeddings = []
+    # Store display labels for plot function
+    display_labels = []
 
     for lbl in unique_gene_clust_labels:
-        print(f"Plotting cell UMAP using gene cluster {lbl}")
-        selected_genes = top_ESS_genes[gene_clust_labels == lbl].tolist()
+        if isinstance(lbl, (list, np.ndarray)):
+            # Multiple clusters combined - use np.isin
+            display_label = ", ".join(str(x) for x in lbl)
+            print(f"Plotting cell UMAP using gene clusters {display_label}")
+            mask = np.isin(gene_clust_labels, lbl)
+            selected_genes = top_ESS_genes[mask].tolist()
+        else:
+            display_label = str(lbl)
+            print(f"Plotting cell UMAP using gene cluster {lbl}")
+            selected_genes = top_ESS_genes[gene_clust_labels == lbl].tolist()
+        display_labels.append(display_label)
         if len(selected_genes) == 0:
             print(f"No genes found in cluster {lbl}, skipping this cluster.")
             # Add to maintain the list length
@@ -373,6 +387,8 @@ def get_gene_cluster_cell_UMAPs(
         ).fit(reduced_input_data)
         gene_cluster_embeddings.append(embedding_model.embedding_)
         #
+    # Store display labels in adata for use by plot function
+    adata.uns['gene_cluster_labels'] = display_labels
     return gene_cluster_embeddings, gene_cluster_selected_genes
 
 
@@ -388,6 +404,8 @@ def plot_gene_cluster_cell_UMAPs(
 ):
     num_plots = len(gene_cluster_embeddings)
     nrow = int(np.ceil(num_plots / ncol))
+    # Get cluster labels from adata (set by get_gene_cluster_cell_UMAPs)
+    gene_cluster_labels = adata.uns.get('gene_cluster_labels', list(range(num_plots)))
     # Check if cell_label is in adata.obs or adata.var
     if cell_label in adata.obs.columns:
         cell_labels = adata.obs[cell_label]
@@ -400,7 +418,7 @@ def plot_gene_cluster_cell_UMAPs(
             row, col = divmod(idx, ncol)
             ax = axes[row, col]
             ax.set_title(
-                f"Gene Cluster {idx} ({len(gene_cluster_selected_genes[idx])} genes)",
+                f"Gene Cluster {gene_cluster_labels[idx]} ({len(gene_cluster_selected_genes[idx])} genes)",
                 fontsize=14,
             )
             for label in unique_cell_labels:
@@ -452,7 +470,7 @@ def plot_gene_cluster_cell_UMAPs(
                 cmap="seismic",
             )
             ax.set_title(
-                f"Gene Cluster {idx} ({len(gene_cluster_selected_genes[idx])} genes)",
+                f"Gene Cluster {gene_cluster_labels[idx]} ({len(gene_cluster_selected_genes[idx])} genes)",
                 fontsize=14,
             )
             ax.set_xticks([])

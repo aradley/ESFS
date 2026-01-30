@@ -140,20 +140,16 @@ def _print_backend_info():
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════════════╗
-║  ESFS Backend: {backend_icon} {backend_name:<40}      ║
+║  ESFS - Entropy Sorting Feature Selection                           ║
+╠══════════════════════════════════════════════════════════════════════╣
+║  ES matrix calculations: {backend_icon} {backend_name:<36}  ║
+║  ES_FMG / ES_CCF:        💻 CPU (Numba JIT)                          ║
 ║  Precision: {precision:<10}                                            ║
 ╠══════════════════════════════════════════════════════════════════════╣
-║  To manually switch backends, run one of:                            ║
-║                                                                      ║
-║    from esfs import backend                                          ║
-║    backend.configure(gpu=False)           # Force CPU                ║
-║    backend.configure(gpu=True)            # Auto-detect GPU          ║
-║    backend.use_cpu()                      # Force CPU (NumPy/Numba)  ║
-║    backend.use_mlx()                      # Force MLX (Apple Silicon)║
-║    backend.use_gpu()                      # Force CUDA (NVIDIA)      ║
-║                                                                      ║
-║  For higher precision (uses more memory):                            ║
-║    backend.configure(gpu=True, upcast=True)   # float64              ║
+║  To switch ES matrix backend:                                        ║
+║    esfs.use_cpu()    # CPU (NumPy/Numba)                             ║
+║    esfs.use_mlx()    # MLX (Apple Silicon)                           ║
+║    esfs.use_gpu()    # CUDA (NVIDIA)                                 ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """)
 
