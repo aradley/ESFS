@@ -1135,13 +1135,6 @@ def calc_ESSs_vec(
             xp_mod,
         )
     # For each feature pair, accept the orientation with the maximum ESS as it is the least likely to have occurred by chance.
-    # DEBUG: Find gene pairs where all 4 orientations are NaN
-    all_nan_mask = xp_mod.all(xp_mod.isnan(all_ESSs), axis=0)
-    if xp_mod.any(all_nan_mask):
-        nan_indices = xp_mod.argwhere(all_nan_mask)
-        print(f"DEBUG: Found {len(nan_indices)} gene pairs with all-NaN ESS values:")
-        for idx in nan_indices[:20]:  # Print first 20
-            print(f"  Fixed feature idx: {idx[0]}, Comparison feature idx: {idx[1]}")
     max_ESS_idxs = xp_mod.nanargmax(xp_mod.absolute(all_ESSs), axis=0)
     # Gather results using advanced indexing
     feature_idx = xp_mod.arange(n_feats)[:, None]
@@ -1194,6 +1187,8 @@ def common_ES_metrics_batched(
     # Avoid division by zero by using where
     all_SWs[use_curve] = xp_mod.where(curve_mask & (ind_E != 0), (ind_E - min_E) / ind_E, all_SWs[use_curve])
     all_SGs[use_curve] = xp_mod.where(curve_mask & ((ind_E - min_E) != 0), (ind_E - CE) / (ind_E - min_E), all_SGs[use_curve])
+    # When ind_E == min_E, SWs = 0, so ESS = 0 regardless of SGs. Set SGs = 0 to avoid NaN.
+    all_SGs[use_curve] = xp_mod.where(curve_mask & ((ind_E - min_E) == 0), 0.0, all_SGs[use_curve])
     # Correct boundary float errors where not NaN
     all_SGs[use_curve] = xp_mod.where(xp_mod.isnan(all_SGs[use_curve]), xp_mod.nan, xp_mod.clip(all_SGs[use_curve], 0, 1))
 
