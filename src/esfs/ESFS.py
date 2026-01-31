@@ -203,6 +203,8 @@ def parallel_calc_es_matrices(
         secondary_features = _ensure_numpy(secondary_features)
         if not spsparse.issparse(secondary_features):
             secondary_features = spsparse.csc_matrix(secondary_features)
+        # Ensure indices are sorted (required for two-pointer merge algorithm in Numba)
+        secondary_features.sort_indices()
     #
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
@@ -212,6 +214,8 @@ def parallel_calc_es_matrices(
         global_scaled_matrix = _ensure_numpy(global_scaled_matrix)
         if not spsparse.issparse(global_scaled_matrix):
             global_scaled_matrix = spsparse.csc_matrix(global_scaled_matrix)
+        # Ensure indices are sorted (required for two-pointer merge algorithm in Numba)
+        global_scaled_matrix.sort_indices()
     ## Extract sample and feature cardinality
     sample_cardinality = global_scaled_matrix.shape[0]
     ## Calculate feature sums and minority states for each adata feature
@@ -470,6 +474,10 @@ def calc_es_metrics_vec(
         fixed_features = _ensure_numpy(fixed_features)
         if not spsparse.issparse(fixed_features):
             fixed_features = spsparse.csc_matrix(fixed_features)
+        else:
+            fixed_features = fixed_features.tocsc()
+        # Ensure indices are sorted (required for two-pointer merge algorithm in Numba)
+        fixed_features.sort_indices()
 
     if xpsparse.issparse(fixed_features):
         if USING_GPU:

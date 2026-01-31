@@ -153,9 +153,11 @@ except Exception as e:
 print("\n8. Full integration test with anndata...")
 import anndata as ad
 
-# Create a simple test adata
-X = spsparse.random(100, 50, density=0.1, format='csc', dtype=np.float32)
+# Create a larger test adata (more samples so genes have >50 expressed cells)
+# 500 samples, 100 features, 30% density = ~150 non-zero per gene on average
+X = spsparse.random(500, 100, density=0.3, format='csc', dtype=np.float32)
 adata = ad.AnnData(X=X)
+print(f"   Created test adata: {adata.shape}")
 
 # First, run with GPU
 print("   Running create_scaled_matrix with GPU backend...")
@@ -173,17 +175,27 @@ esfs.use_cpu()
 print(f"   backend.using_gpu: {backend.using_gpu}")
 print(f"   ESFS.USING_GPU: {esfs_module.USING_GPU}")
 
+# Check if Scaled_Counts is still CuPy
+print(f"\n   After CPU switch, before calc:")
+print(f"   Scaled_Counts type: {type(adata.layers['Scaled_Counts'])}")
+print(f"   Scaled_Counts.data type: {type(adata.layers['Scaled_Counts'].data)}")
+
 # Run the calculation
-print("\n   Running parallel_calc_es_matrices...")
+print("\n   Running parallel_calc_es_matrices (subset of 30 features for speed)...")
+# Use a subset for faster testing
+adata_test = adata[:, :30].copy()
+adata_test.layers['Scaled_Counts'] = adata.layers['Scaled_Counts'][:, :30]
+print(f"   Test adata shape: {adata_test.shape}")
+print(f"   Test Scaled_Counts type: {type(adata_test.layers['Scaled_Counts'])}")
 try:
-    adata = esfs.parallel_calc_es_matrices(
-        adata,
+    adata_test = esfs.parallel_calc_es_matrices(
+        adata_test,
         secondary_features_label="Self",
         save_matrices=np.array(["ESSs", "EPs"]),
         use_cores=2
     )
 
-    ESSs = adata.varm['Self_ESSs']
+    ESSs = adata_test.varm['Self_ESSs']
     print(f"\n   Results:")
     print(f"   ESSs shape: {ESSs.shape}")
     print(f"   ESSs NaN count: {np.isnan(ESSs).sum()} / {ESSs.size}")
