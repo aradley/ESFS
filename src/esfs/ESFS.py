@@ -1135,7 +1135,14 @@ def calc_ESSs_vec(
             xp_mod,
         )
     # For each feature pair, accept the orientation with the maximum ESS as it is the least likely to have occurred by chance.
-    max_ESS_idxs = xp_mod.nanargmax(xp_mod.absolute(all_ESSs), axis=0)
+    # Handle all-NaN slices (no valid comparison - e.g., no overlapping cells between features)
+    all_nan_mask = xp_mod.all(xp_mod.isnan(all_ESSs), axis=0)
+    temp_ESSs = all_ESSs
+    if xp_mod.any(all_nan_mask):
+        # Set one value to 0 to avoid nanargmax error; indexing into original array still gives NaN
+        temp_ESSs = all_ESSs.copy()
+        temp_ESSs[0, all_nan_mask] = 0.0
+    max_ESS_idxs = xp_mod.nanargmax(xp_mod.absolute(temp_ESSs), axis=0)
     # Gather results using advanced indexing
     feature_idx = xp_mod.arange(n_feats)[:, None]
     comparison_idx = xp_mod.arange(n_comps)[None, :]
