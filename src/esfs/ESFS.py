@@ -36,6 +36,27 @@ def _update_module_backend():
 
 ###### Entropy Sorting (ES) metric calculations ######
 
+def _ensure_numpy(arr):
+    """Convert CuPy arrays to NumPy when on CPU backend. Handles both dense and sparse arrays."""
+    if arr is None:
+        return arr
+    # Check for CuPy dense array
+    try:
+        import cupy
+        if isinstance(arr, cupy.ndarray):
+            return arr.get()
+    except ImportError:
+        pass
+    # Check for CuPy sparse array
+    try:
+        import cupyx.scipy.sparse as cupy_sparse
+        if isinstance(arr, (cupy_sparse.csr_matrix, cupy_sparse.csc_matrix,
+                            cupy_sparse.coo_matrix, cupy_sparse.dia_matrix)):
+            return arr.get()
+    except ImportError:
+        pass
+    return arr
+
 # Using the Entropy Sorting (ES) mathematical framework, we may caclulate the ESS, EP, SW and SG correlation metrics
 # outlined in Radley et al. 2023 for any pair of features. The below code takes an anndata object as an input, calculates the
 # requested ES metrics against each variable/feature in the adata object, and adds them as an attribute to the object for later use.
@@ -177,10 +198,20 @@ def parallel_calc_es_matrices(
         secondary_features = adata.obsm[secondary_features_label]
     # Ensure sparse csc matrix with appropriate backend (handles GPU<->CPU switching)
     secondary_features = _convert_sparse_array(secondary_features)
+    # When on CPU, ensure it's scipy sparse (in case _convert_sparse_array missed something)
+    if not USING_GPU:
+        secondary_features = _ensure_numpy(secondary_features)
+        if not spsparse.issparse(secondary_features):
+            secondary_features = spsparse.csc_matrix(secondary_features)
     #
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
     global_scaled_matrix = _convert_sparse_array(adata.layers["Scaled_Counts"])
+    # When on CPU, ensure it's scipy sparse
+    if not USING_GPU:
+        global_scaled_matrix = _ensure_numpy(global_scaled_matrix)
+        if not spsparse.issparse(global_scaled_matrix):
+            global_scaled_matrix = spsparse.csc_matrix(global_scaled_matrix)
     ## Extract sample and feature cardinality
     sample_cardinality = global_scaled_matrix.shape[0]
     ## Calculate feature sums and minority states for each adata feature
@@ -188,22 +219,27 @@ def parallel_calc_es_matrices(
     global feature_sums
     if not USING_GPU:
         feature_sums = global_scaled_matrix.sum(axis=0).A.flatten()
+        feature_sums = np.asarray(feature_sums).flatten()  # Ensure NumPy array
     else:
         feature_sums = global_scaled_matrix.sum(axis=0).flatten()
     global minority_states
     minority_states = feature_sums.copy()
-    idxs = xp.where(minority_states >= (sample_cardinality / 2))[0]
+    if not USING_GPU:
+        # Use numpy explicitly when on CPU
+        idxs = np.where(minority_states >= (sample_cardinality / 2))[0]
+    else:
+        idxs = xp.where(minority_states >= (sample_cardinality / 2))[0]
     minority_states[idxs] = sample_cardinality - minority_states[idxs]
     ####
     ## Provide indicies for parallel computing.
-    feature_inds = xp.arange(secondary_features.shape[1])
+    if not USING_GPU:
+        feature_inds = np.arange(secondary_features.shape[1])
+    else:
+        feature_inds = xp.arange(secondary_features.shape[1])
     # Get number of cores to use
     use_cores = get_num_cores(use_cores)
     ## Perform calculations
     print("Calculating ESS and EP matricies.")
-    print(
-        "If progress bar freezes consider increasing system memory or reducing number of cores used with the 'use_cores' parameter as you may have hit a memory ceiling for your machine."
-    )
     ## Parallel compute
     with np.errstate(divide="ignore", invalid="ignore"):
         # Set number of threads for Numba parallel execution (CPU only)
@@ -421,13 +457,25 @@ def calc_es_metrics_vec(
     `feature_sums` - Inherited vector of the columns sums of adata.
     `minority_states` - Inherited vector of the minority state sums of each column of adata.
     """
+    # When on CPU, ensure all input arrays are NumPy (handles GPU->CPU switching)
+    if not USING_GPU:
+        feature_inds = np.asarray(_ensure_numpy(feature_inds))
+        feature_sums = np.asarray(_ensure_numpy(feature_sums))
+        minority_states = np.asarray(_ensure_numpy(minority_states))
+
     ## Extract the Fixed Feature (FF)
     fixed_features = secondary_features[:, feature_inds]
+    # Ensure fixed_features is in the correct format for current backend
+    if not USING_GPU:
+        fixed_features = _ensure_numpy(fixed_features)
+        if not spsparse.issparse(fixed_features):
+            fixed_features = spsparse.csc_matrix(fixed_features)
+
     if xpsparse.issparse(fixed_features):
         if USING_GPU:
             fixed_features_cardinality = fixed_features.sum(axis=0).flatten()
         else:
-            fixed_features_cardinality = fixed_features.sum(axis=0).A.flatten()
+            fixed_features_cardinality = np.asarray(fixed_features.sum(axis=0).A.flatten())
     else:
         fixed_features_cardinality = fixed_features.toarray().sum(axis=0)
     fixed_feature_minority_states = fixed_features_cardinality.copy()
@@ -439,8 +487,10 @@ def calc_es_metrics_vec(
     ## Identify where FF is the QF or RF
     FF_QF_vs_RF = fixed_feature_minority_states[:, None] > minority_states[None, :]
     ## Calculate the QFms, RFms, RFMs and QFMs for each FF and secondary feature pair
-    RFms = xp.where(~FF_QF_vs_RF, fixed_feature_minority_states[:, None], minority_states[None, :])
-    QFms = xp.where(FF_QF_vs_RF, fixed_feature_minority_states[:, None], minority_states[None, :])
+    # Use numpy explicitly when on CPU
+    arr_mod = np if not USING_GPU else xp
+    RFms = arr_mod.where(~FF_QF_vs_RF, fixed_feature_minority_states[:, None], minority_states[None, :])
+    QFms = arr_mod.where(FF_QF_vs_RF, fixed_feature_minority_states[:, None], minority_states[None, :])
     RFMs = sample_cardinality - RFms
     QFMs = sample_cardinality - QFms
 
@@ -449,7 +499,7 @@ def calc_es_metrics_vec(
     max_ent_x_Mm = (QFMs * RFms) / (RFms + RFMs)
     max_ent_x_mM = (RFMs * QFms) / (RFms + RFMs)
     max_ent_x_MM = (RFMs * QFMs) / (RFms + RFMs)
-    max_ent_options = xp.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
+    max_ent_options = arr_mod.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
     ######
     ## Calculate the overlap between the FF states and the secondary features
     all_ESSs = []
@@ -477,10 +527,10 @@ def calc_es_metrics_vec(
         case_idxs,
         case_patterns,
         overlap_lookup,
-        xp_mod=xp,
+        xp_mod=arr_mod,
         chunksize=chunksize,
     )
-    iden_feats, iden_cols = xp.nonzero(all_ESSs == 1)
+    iden_feats, iden_cols = arr_mod.nonzero(all_ESSs == 1)
     all_D_EPs[iden_feats, iden_cols] = 0
     all_O_EPs[iden_feats, iden_cols] = 0
     all_EPs = nanmaximum(all_D_EPs, all_O_EPs)
@@ -540,13 +590,20 @@ def get_overlap_info_vec(
         )
     else:
         # Use sparse-sparse two-pointer merge (no densification needed)
+        # Ensure all arrays are NumPy arrays (handles GPU->CPU switching)
+        ff_data = np.asarray(_ensure_numpy(fixed_features.data))
+        ff_indices = np.asarray(_ensure_numpy(fixed_features.indices))
+        ff_indptr = np.asarray(_ensure_numpy(fixed_features.indptr))
+        gs_data = np.asarray(_ensure_numpy(global_scaled_matrix.data))
+        gs_indices = np.asarray(_ensure_numpy(global_scaled_matrix.indices))
+        gs_indptr = np.asarray(_ensure_numpy(global_scaled_matrix.indptr))
         overlaps, inverse_overlaps = overlaps_and_inverse_sparse(
-            fixed_features.data,
-            fixed_features.indices,
-            fixed_features.indptr,
-            global_scaled_matrix.data,
-            global_scaled_matrix.indices,
-            global_scaled_matrix.indptr,
+            ff_data,
+            ff_indices,
+            ff_indptr,
+            gs_data,
+            gs_indices,
+            gs_indptr,
             fixed_features.shape[0],      # n_samples
             fixed_features.shape[1],      # n_fixed_features
             global_scaled_matrix.shape[1], # n_features
@@ -599,6 +656,13 @@ def get_overlap_info_vec(
     else:
         xp.put_along_axis(overlap_lookup, row_map, [0, 1], axis=1)
     # Now return the overlaps, and what we need to extract everything needed for ESS calcs later
+    # Ensure all outputs are NumPy arrays when on CPU (handles GPU->CPU switching)
+    if not USING_GPU:
+        overlaps = np.asarray(_ensure_numpy(overlaps))
+        inverse_overlaps = np.asarray(_ensure_numpy(inverse_overlaps))
+        case_idxs = np.asarray(_ensure_numpy(case_idxs))
+        case_patterns = np.asarray(_ensure_numpy(case_patterns))
+        overlap_lookup = np.asarray(_ensure_numpy(overlap_lookup))
     return overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup
 
 
@@ -876,7 +940,7 @@ def calc_ESSs_chunked(
             case_idxs,
             case_patterns,
             overlap_lookup,
-            xp_mod=xp,
+            xp_mod=xp_mod,
         )
         return all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs
     # Otherwise, process in chunks
@@ -1906,9 +1970,6 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
     use_cores = get_num_cores(use_cores)
     ## Perform calculations
     print("Calculating ESS and EP matricies.")
-    print(
-        "If progress bar freezes consider increasing system memory or reducing number of cores used with the 'use_cores' parameter as you may have hit a memory ceiling for your machine."
-    )
     with np.errstate(divide="ignore", invalid="ignore"):
         if USING_GPU or USING_MLX:
             # Process genes in chunks with progress bar (default: 20 chunks = 5% increments)
