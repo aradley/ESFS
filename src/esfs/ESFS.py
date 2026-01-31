@@ -590,13 +590,15 @@ def get_overlap_info_vec(
         )
     else:
         # Use sparse-sparse two-pointer merge (no densification needed)
-        # Ensure all arrays are NumPy arrays (handles GPU->CPU switching)
-        ff_data = np.asarray(_ensure_numpy(fixed_features.data))
-        ff_indices = np.asarray(_ensure_numpy(fixed_features.indices))
-        ff_indptr = np.asarray(_ensure_numpy(fixed_features.indptr))
-        gs_data = np.asarray(_ensure_numpy(global_scaled_matrix.data))
-        gs_indices = np.asarray(_ensure_numpy(global_scaled_matrix.indices))
-        gs_indptr = np.asarray(_ensure_numpy(global_scaled_matrix.indptr))
+        # Ensure all arrays are NumPy arrays with correct dtypes (handles GPU->CPU switching)
+        # Numba expects specific dtypes: float32/64 for data, int32/int64 for indices
+        target_dtype = np.float64 if use_float64 else np.float32
+        ff_data = np.ascontiguousarray(_ensure_numpy(fixed_features.data), dtype=target_dtype)
+        ff_indices = np.ascontiguousarray(_ensure_numpy(fixed_features.indices), dtype=np.int32)
+        ff_indptr = np.ascontiguousarray(_ensure_numpy(fixed_features.indptr), dtype=np.int32)
+        gs_data = np.ascontiguousarray(_ensure_numpy(global_scaled_matrix.data), dtype=target_dtype)
+        gs_indices = np.ascontiguousarray(_ensure_numpy(global_scaled_matrix.indices), dtype=np.int32)
+        gs_indptr = np.ascontiguousarray(_ensure_numpy(global_scaled_matrix.indptr), dtype=np.int32)
         overlaps, inverse_overlaps = overlaps_and_inverse_sparse(
             ff_data,
             ff_indices,
@@ -995,6 +997,20 @@ def calc_ESSs_vec(
     overlap_lookup,
     xp_mod
 ):
+    # When using numpy (CPU mode), ensure all input arrays are numpy arrays
+    # This handles the case where arrays were created with CuPy before switching to CPU
+    if xp_mod is np:
+        RFms = np.asarray(_ensure_numpy(RFms))
+        QFms = np.asarray(_ensure_numpy(QFms))
+        RFMs = np.asarray(_ensure_numpy(RFMs))
+        QFMs = np.asarray(_ensure_numpy(QFMs))
+        max_ent_options = np.asarray(_ensure_numpy(max_ent_options))
+        overlaps = np.asarray(_ensure_numpy(overlaps))
+        inverse_overlaps = np.asarray(_ensure_numpy(inverse_overlaps))
+        case_idxs = np.asarray(_ensure_numpy(case_idxs))
+        case_patterns = np.asarray(_ensure_numpy(case_patterns))
+        overlap_lookup = np.asarray(_ensure_numpy(overlap_lookup))
+
     n_feats = RFms.shape[0]
     n_comps = RFms.shape[1]
     # Create output arrays, with NaNs for easier later masking/maximum selection
