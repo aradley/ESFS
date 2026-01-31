@@ -103,6 +103,19 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
     return adata
 
 def _convert_sparse_array(arr, to_scipy: bool = False):
+    # Check if this is a CuPy sparse matrix (needs special handling when on CPU)
+    is_cupy_sparse = False
+    try:
+        import cupyx.scipy.sparse as cupy_sparse
+        is_cupy_sparse = isinstance(arr, (cupy_sparse.csr_matrix, cupy_sparse.csc_matrix,
+                                          cupy_sparse.coo_matrix, cupy_sparse.dia_matrix))
+    except ImportError:
+        pass
+
+    # If CuPy sparse and we're on CPU, convert to scipy sparse first
+    if is_cupy_sparse and not USING_GPU:
+        arr = arr.get()  # Convert CuPy sparse to scipy sparse
+
     # If scipy sparse (specifically)
     if spsparse.issparse(arr):
         # If cupy used, appropriately convert from scipy
@@ -116,6 +129,9 @@ def _convert_sparse_array(arr, to_scipy: bool = False):
             elif spsparse.isspmatrix_dia(arr):
                 arr = xpsparse.dia_matrix(arr)
         # No matter what, convert to CSC for processing
+        arr = arr.tocsc()
+    # If CuPy sparse and we're on GPU, just convert to CSC
+    elif is_cupy_sparse and USING_GPU:
         arr = arr.tocsc()
     # If not sparse, convert to sparse with whatever backend is being used
     else:
@@ -159,12 +175,12 @@ def parallel_calc_es_matrices(
             "You have provided a 'secondary_features_label', implying that in the anndata object there is a corresponding csc_sparse martix object with rows as samples and columns as features. Each feature will be used to calculate ES scores for each of the variables of the adata object"
         )
         secondary_features = adata.obsm[secondary_features_label]
-        # Ensure sparse csc matrix with appropriate backend
-        secondary_features = _convert_sparse_array(secondary_features)
+    # Ensure sparse csc matrix with appropriate backend (handles GPU<->CPU switching)
+    secondary_features = _convert_sparse_array(secondary_features)
     #
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
-    global_scaled_matrix = adata.layers["Scaled_Counts"]
+    global_scaled_matrix = _convert_sparse_array(adata.layers["Scaled_Counts"])
     ## Extract sample and feature cardinality
     sample_cardinality = global_scaled_matrix.shape[0]
     ## Calculate feature sums and minority states for each adata feature
