@@ -401,6 +401,7 @@ def plot_gene_cluster_cell_UMAPs(
     log2_gene_expression: bool = True,
     figsize: tuple = (18, 10),
     marker_size: int = 3,
+    sort_by_value: bool = True,
 ):
     num_plots = len(gene_cluster_embeddings)
     nrow = int(np.ceil(num_plots / ncol))
@@ -461,7 +462,10 @@ def plot_gene_cluster_cell_UMAPs(
         for idx, Embedding in enumerate(gene_cluster_embeddings):
             row, col = divmod(idx, ncol)
             ax = fig.add_subplot(outer_grid[row, col])
-            Order = np.argsort(expression)
+            if sort_by_value:
+                Order = np.argsort(expression)
+            else:
+                Order = np.arange(len(expression))
             sc = ax.scatter(
                 Embedding[Order, 0],
                 Embedding[Order, 1],
