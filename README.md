@@ -8,11 +8,11 @@ ESFS is an Entropy Sorting based feature selection package primarily developed f
 
 > **Note:** This is the frozen release accompanying our publication. For the latest version with additional features (including Apple Silicon GPU support), see the [latest release](https://github.com/aradley/ESFS).
 
-Please see our manuscript for details regarding ESFS -
+Please see our manuscript for details regarding ESFS - [ESFS: A Noise-Resilient Framework for Feature Selection and Marker Gene Discovery in Single-Cell Transcriptomics](https://www.biorxiv.org/content/10.64898/2026.01.26.701684v1).
 
 Go to the Example_Workflows folder to see some example workflows that you may adapt for your own data.
 
-Datasets for reproducing the example workflows may be found at the following Mendeley Data repository -
+Datasets for reproducing the example workflows may be found at the following Mendeley Data repository - https://figshare.com/s/4e445e7fa03cc4ccd289
 
 ### Installation (Paper Version)
 
