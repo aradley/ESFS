@@ -2,11 +2,9 @@
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/aradley/ESFS/releases/tag/v1.0.0)
 
-**Version 1.0.0** - Manuscript version
+**Version 1.0.0** - Manuscript release
 
 ESFS is an Entropy Sorting based feature selection package primarily developed for feature selection and marker gene identification in single cell RNA sequencing datasets.
-
-> **Note:** This is the frozen release accompanying our publication. For the latest version with additional features (including Apple Silicon GPU support), see the [latest release](https://github.com/aradley/ESFS).
 
 Please see our manuscript for details regarding ESFS - [ESFS: A Noise-Resilient Framework for Feature Selection and Marker Gene Discovery in Single-Cell Transcriptomics](https://www.biorxiv.org/content/10.64898/2026.01.26.701684v1)
 
