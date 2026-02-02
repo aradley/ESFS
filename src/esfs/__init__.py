@@ -2,7 +2,7 @@
 ESFS - Entropy Sorting Feature Selection
 """
 
-__version__ = "0.0.1"
+__version__ = "2.0.0"
 
 # Backend configuration
 from . import backend as _backend_module

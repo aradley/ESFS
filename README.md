@@ -1,28 +1,38 @@
 # ESFS
 
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/aradley/ESFS)
+
+**Version 2.0.0**
+
 ESFS is an Entropy Sorting based feature selection package primarily developed for feature selection and marker gene identification in single cell RNA sequencing datasets.
 
-Please see our manuscript for details regarding ESFS - 
+> **Looking for the paper version?** Install v1.0.0 for exact reproducibility:
+> ```
+> pip install git+https://github.com/aradley/ESFS.git@v1.0.0
+> ```
+
+Please see our manuscript for details regarding ESFS -
 
 Go to the Example_Workflows folder to see some example workflows that you may adapt for your own data.
 
-Datasets for reproducing the example workflows may be found at the following Mendeley Data repsitory - 
+Datasets for reproducing the example workflows may be found at the following Mendeley Data repository -
 
 ## Software overview
 
 ![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
 
 ### Installation
-Either install this repository directly via:
+
+Install the latest version:
 
 ```
-pip install git+https://github.com/aradley/ESFS.git@memory_optimised
+pip install git+https://github.com/aradley/ESFS.git
 ```
 
 or clone and then install:
 
 ```
-git clone -b memory_optimised git@github.com:aradley/ESFS.git
+git clone git@github.com:aradley/ESFS.git
 cd ESFS
 pip install .
 ```
