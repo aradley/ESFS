@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "ESFS: Entropy Sorting Feature Selection"
+version: 1.0.0
+date-released: 2026-02-02
+authors:
+  - family-names: "Radley"
+    given-names: "Arthur"
+    email: "arthur_radley@hotmail.co.uk"
+repository-code: "https://github.com/aradley/ESFS"
+keywords:
+  - feature-selection
+  - single-cell
+  - RNA-sequencing
+  - entropy
+  - bioinformatics
+# Uncomment and fill in when paper is published:
+# preferred-citation:
+#   type: article
+#   authors:
+#     - family-names: "Radley"
+#       given-names: "Arthur"
+#   title: "Your Paper Title"
+#   journal: "Journal Name"
+#   year: 2026
+#   doi: "10.xxxx/xxxxx"
