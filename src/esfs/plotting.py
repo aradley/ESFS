@@ -2,6 +2,7 @@ from typing import List, Optional, Union
 import warnings
 
 from joblib import Parallel, delayed
+import numba
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -28,80 +29,231 @@ def _update_module_backend():
     USING_GPU = backend.using_gpu
 
 
+# Numba-accelerated KNN helper functions
+@numba.njit(parallel=True, fastmath=True)
+def _normalize_rows(X):
+    """Center and normalize each row of X for correlation computation.
+
+    After normalization, correlation(a, b) = a @ b
+    """
+    n_cells, n_genes = X.shape
+    X_norm = np.empty((n_cells, n_genes), dtype=np.float64)
+
+    for i in numba.prange(n_cells):
+        # Compute mean
+        mean_val = 0.0
+        for j in range(n_genes):
+            mean_val += X[i, j]
+        mean_val /= n_genes
+
+        # Center and compute norm
+        norm_sq = 0.0
+        for j in range(n_genes):
+            X_norm[i, j] = X[i, j] - mean_val
+            norm_sq += X_norm[i, j] * X_norm[i, j]
+
+        # Normalize
+        norm_val = np.sqrt(norm_sq)
+        if norm_val > 1e-10:
+            for j in range(n_genes):
+                X_norm[i, j] /= norm_val
+        else:
+            # Constant row - set to zero
+            for j in range(n_genes):
+                X_norm[i, j] = 0.0
+
+    return X_norm
+
+
+def _find_knn_from_correlations(correlations, knn):
+    """Find k-nearest neighbors from pre-computed correlation matrix.
+
+    Uses numpy's argpartition for O(n) partial sort instead of O(n log n) full sort.
+
+    Parameters:
+        correlations: (n_cells, n_cells) correlation matrix
+        knn: number of neighbors
+
+    Returns:
+        neighbors: (n_cells, knn) array of neighbor indices
+    """
+    # Convert correlations to distances (1 - correlation)
+    distances = 1.0 - correlations
+
+    # Use argpartition for efficient k-smallest selection (O(n) vs O(n log n) for argsort)
+    # argpartition puts the k smallest elements in the first k positions (unordered)
+    neighbors = np.argpartition(distances, kth=knn, axis=1)[:, :knn]
+
+    return neighbors
+
+
+@numba.njit(fastmath=True)
+def _smooth_expression_chunk(full_X, neighbors, start_idx, end_idx):
+    """Smooth a chunk of cells by averaging over k neighbors.
+
+    Parameters:
+        full_X: (n_cells, n_genes) full expression matrix
+        neighbors: (n_cells, knn) neighbor indices
+        start_idx: starting cell index for this chunk
+        end_idx: ending cell index for this chunk (exclusive)
+
+    Returns:
+        smoothed: (chunk_size, n_genes) smoothed expression for this chunk
+    """
+    n_genes = full_X.shape[1]
+    knn = neighbors.shape[1]
+    chunk_size = end_idx - start_idx
+    smoothed = np.empty((chunk_size, n_genes), dtype=np.float32)
+
+    for i in range(chunk_size):
+        cell_idx = start_idx + i
+        for g in range(n_genes):
+            total = 0.0
+            for k in range(knn):
+                total += full_X[neighbors[cell_idx, k], g]
+            smoothed[i, g] = total / knn
+
+    return smoothed
+
+
 def knn_smooth_gene_expression(
     adata,
     use_genes,
     knn: int = 30,
     metric: str = "correlation",
     log_scale: bool = False,
-    batch_size: int = 1000,
-    n_jobs: int = -1,
+    chunksize: Optional[int] = None,
 ):
+    """Smooth gene expression by averaging over k nearest neighbors.
+
+    Uses Numba-accelerated correlation distance computation and parallel processing.
+
+    Parameters:
+        adata: AnnData object with expression data
+        use_genes: List of gene names to use for computing distances
+        knn: Number of nearest neighbors (default: 30)
+        metric: Distance metric, currently only "correlation" is supported
+        log_scale: If True, log2-transform expression before computing distances
+        chunksize: Chunk size for progress updates (default: 5% of cells)
+
+    Returns:
+        adata with smoothed expression in adata.layers["Smoothed_Expression"]
+    """
     assert metric == "correlation", "Currently only 'correlation' metric is supported."
 
     use_gene_idxs = np.nonzero(np.isin(np.asarray(adata.var_names), use_genes))[0]
 
-    # NOTE: If needed in future, could try to keep sparse, similar to create_scaled_matrix
-    X_subset = adata[:, use_gene_idxs].X
-    if spsparse.issparse(X_subset):
-        X_subset = X_subset.toarray()
-    elif xpsparse.issparse(X_subset):
-        # If we reach this, it must be a cupy sparse array so we can .get() directly
-        X_subset = X_subset.toarray().get()
-    if log_scale:
-        X_subset = np.log2(X_subset + 1)
+    n_cells = adata.n_obs
+    n_use_genes = len(use_gene_idxs)
 
-    n_cells = X_subset.shape[0]
-    print(
-        f"Computing batched correlation distances for {n_cells} cells, batch size = {batch_size}"
-    )
+    # Determine chunk size for progress updates and loading
+    # Default: min(5000, 5% of cells)
+    progress_chunksize = chunksize if chunksize is not None else min(5000, max(1, n_cells // 20))
 
-    # Function to compute distances for a batch
-    def compute_batch(i_start, i_end):
-        batch = X_subset[i_start:i_end]
-        dists = cdist(batch, X_subset, metric=metric)
-        # For each row, get top-k indices (excluding self optionally)
-        neighbors_batch = np.argpartition(dists, kth=knn, axis=1)[:, :knn]
-        return neighbors_batch
+    # For KNN step, auto-limit chunk size to keep correlation matrix under ~5GB
+    # Memory per KNN chunk = chunksize × n_cells × 8 bytes
+    # Solving for chunksize: 5GB / (n_cells × 8)
+    knn_chunksize = min(progress_chunksize, max(100, 5_000_000_000 // (n_cells * 8)))
 
-    # Launch batches in parallel
-    batch_ranges = [
-        (i, min(i + batch_size, n_cells)) for i in range(0, n_cells, batch_size)
-    ]
-    all_neighbors = Parallel(n_jobs=n_jobs)(
-        delayed(compute_batch)(i_start, i_end) for (i_start, i_end) in batch_ranges
-    )
+    print(f"KNN smoothing: {n_cells} cells, chunksize={progress_chunksize}")
+    if knn_chunksize < progress_chunksize:
+        print(f"  KNN step using chunksize={knn_chunksize} (auto-limited for memory efficiency)")
+    print("  Tip: Use chunksize parameter to adjust speed vs memory trade-off")
 
-    # Concatenate all neighbor indices
-    neighbors = np.vstack(all_neighbors)
+    # Extract subset for distance computation in chunks
+    # This avoids having full sparse + full dense in memory simultaneously
+    X_subset = np.empty((n_cells, n_use_genes), dtype=np.float64)
 
-    # Get full expression matrix for smoothing
-    # NOTE: If needed in future, could try to keep sparse, similar to create_scaled_matrix
-    full_X = adata.X
-    if spsparse.issparse(full_X):
-        full_X = full_X.toarray()
-    elif xpsparse.issparse(full_X):
-        full_X = full_X.toarray().get()
-    if log_scale:
-        full_X = np.log2(full_X + 1)
+    with tqdm(total=n_cells, desc="Loading gene subset", unit="cells") as pbar:
+        for chunk_start in range(0, n_cells, progress_chunksize):
+            chunk_end = min(chunk_start + progress_chunksize, n_cells)
 
-    # Smooth expression matrix using mean over k neighbors, with progress bar
-    n_cells = neighbors.shape[0]
-    n_genes = full_X.shape[1]
-    smoothed_expression = np.zeros((n_cells, n_genes), dtype=np.float32)
+            # Load small chunk from sparse
+            chunk = adata[chunk_start:chunk_end, use_gene_idxs].X
+            if spsparse.issparse(chunk):
+                chunk = chunk.toarray()
+            elif xpsparse.issparse(chunk):
+                chunk = chunk.toarray().get()
+            chunk = np.ascontiguousarray(chunk, dtype=np.float64)
 
-    # Process in chunks (20 chunks = 5% updates)
-    chunk_size = max(1, (n_cells + 19) // 20)
+            # Transform chunk in-place if needed
+            if log_scale:
+                chunk += 1
+                np.log2(chunk, out=chunk)
+
+            # Copy to output
+            X_subset[chunk_start:chunk_end] = chunk
+            pbar.update(chunk_end - chunk_start)
+
+    # Step 1: Normalize rows for correlation computation
+    X_norm = _normalize_rows(X_subset)
+
+    # Free X_subset memory before loading full_X
+    del X_subset
+
+    # Step 2: Find KNN in chunks WITHOUT storing full correlation matrix
+    # This avoids O(n²) memory which would be ~2.95TB for 607K cells
+    neighbors = np.empty((n_cells, knn), dtype=np.int64)
+
+    with tqdm(total=n_cells, desc="Finding neighbors", unit="cells") as pbar:
+        for chunk_start in range(0, n_cells, knn_chunksize):
+            chunk_end = min(chunk_start + knn_chunksize, n_cells)
+
+            # Compute correlations from chunk to ALL cells
+            # Shape: (chunk_size, n_cells) - manageable memory
+            chunk_correlations = X_norm[chunk_start:chunk_end] @ X_norm.T
+
+            # Convert to distances and find k-nearest
+            chunk_distances = 1.0 - chunk_correlations
+            neighbors[chunk_start:chunk_end] = np.argpartition(
+                chunk_distances, kth=knn, axis=1
+            )[:, :knn]
+
+            # Immediately discard to free memory
+            del chunk_correlations, chunk_distances
+
+            pbar.update(chunk_end - chunk_start)
+
+    # Get full expression matrix for smoothing in chunks
+    # This avoids having full sparse + full dense in memory simultaneously
+    n_genes = adata.n_vars
+    full_X = np.empty((n_cells, n_genes), dtype=np.float64)
+
+    with tqdm(total=n_cells, desc="Loading full matrix", unit="cells") as pbar:
+        for chunk_start in range(0, n_cells, progress_chunksize):
+            chunk_end = min(chunk_start + progress_chunksize, n_cells)
+
+            # Load small chunk from sparse
+            chunk = adata[chunk_start:chunk_end].X
+            if spsparse.issparse(chunk):
+                chunk = chunk.toarray()
+            elif xpsparse.issparse(chunk):
+                chunk = chunk.toarray().get()
+            chunk = np.ascontiguousarray(chunk, dtype=np.float64)
+
+            # Transform chunk in-place if needed
+            if log_scale:
+                chunk += 1
+                np.log2(chunk, out=chunk)
+
+            # Copy to output
+            full_X[chunk_start:chunk_end] = chunk
+            pbar.update(chunk_end - chunk_start)
+
+    # Step 4: Smooth expression in chunks with progress bar
+    smoothed_expression = np.empty((n_cells, n_genes), dtype=np.float32)
 
     with tqdm(total=n_cells, desc="Smoothing expression", unit="cells") as pbar:
-        for chunk_start in range(0, n_cells, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, n_cells)
-            for i in range(chunk_start, chunk_end):
-                smoothed_expression[i] = np.mean(full_X[neighbors[i]], axis=0)
+        for chunk_start in range(0, n_cells, progress_chunksize):
+            chunk_end = min(chunk_start + progress_chunksize, n_cells)
+            smoothed_expression[chunk_start:chunk_end] = _smooth_expression_chunk(
+                full_X, neighbors, chunk_start, chunk_end
+            )
             pbar.update(chunk_end - chunk_start)
-    adata.layers["Smoothed_Expression"] = _convert_sparse_array(
-        smoothed_expression.astype(np.float32), to_scipy=True
-    )
+
+    # Store as dense array - smoothed values are rarely zero (they're averages)
+    print("Storing smoothed expression as dense array (smoothed arrays are significantly less sparse)")
+    adata.layers["Smoothed_Expression"] = smoothed_expression
     return adata
 
 

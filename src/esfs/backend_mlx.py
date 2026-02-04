@@ -188,3 +188,194 @@ def overlaps_and_inverse_mlx(fixed_features_csc, global_scaled_matrix_csc, use_f
 
     # Convert back to numpy
     return np.array(outputs[0]), np.array(outputs[1])
+
+
+# Cache for ES_CCF overlap kernel
+_esccf_overlaps_kernel_f32 = None
+
+
+def get_esccf_overlaps_kernel():
+    """Get or create the ES_CCF overlaps Metal kernel.
+
+    This kernel computes overlaps with per-feature sort orders and cumulative sums.
+    Uses a 1D grid with one thread per gene, processing all cumsum levels incrementally.
+    Binary search is used for sparse lookups.
+
+    Returns:
+        Compiled Metal kernel for float32 precision.
+    """
+    global _esccf_overlaps_kernel_f32
+
+    if _esccf_overlaps_kernel_f32 is not None:
+        return _esccf_overlaps_kernel_f32
+
+    import mlx.core as mx
+
+    # Metal kernel for ES_CCF overlap computation
+    # Grid: (n_fixed_features,) - one thread per gene
+    # Each thread processes all cumsum levels sequentially with binary search
+    source = """
+    uint ff_idx = thread_position_in_grid.x;
+    if (ff_idx >= n_fixed_features) return;
+
+    // Get fixed feature column range (CSC format)
+    int ff_start = ff_indptr[ff_idx];
+    int ff_end = ff_indptr[ff_idx + 1];
+    int ff_nnz = ff_end - ff_start;
+
+    // Track total active samples across cumulative clusters
+    int total_active = 0;
+
+    // Process each cumsum level incrementally
+    for (int cumsum_idx = 0; cumsum_idx < (int)n_clusters; cumsum_idx++) {
+        // Get the cluster to add at this level
+        int cluster_idx = sort_orders[ff_idx * n_clusters + cumsum_idx];
+        int sf_cl_start = sf_indptr[cluster_idx];
+        int sf_cl_end = sf_indptr[cluster_idx + 1];
+        int cluster_size = sf_cl_end - sf_cl_start;
+
+        // Add cluster size to total active
+        total_active += cluster_size;
+
+        // Count active samples that have non-zero ff values and compute overlap
+        float overlap_sum = 0.0f;
+        float inverse_overlap_nonzero_sum = 0.0f;
+        int n_active_with_nonzero_ff = 0;
+
+        // For each non-zero entry in fixed feature
+        for (int ff_ptr = ff_start; ff_ptr < ff_end; ff_ptr++) {
+            int sample = ff_indices[ff_ptr];
+            float ff_val = ff_data[ff_ptr];
+
+            // Check if sample is in any cluster 0..cumsum_idx using binary search
+            bool in_active = false;
+            for (int k = 0; k <= cumsum_idx && !in_active; k++) {
+                int cl_idx = sort_orders[ff_idx * n_clusters + k];
+                int cl_start = sf_indptr[cl_idx];
+                int cl_end = sf_indptr[cl_idx + 1];
+
+                // Binary search for sample in cluster
+                int lo = cl_start, hi = cl_end;
+                while (lo < hi) {
+                    int mid = (lo + hi) / 2;
+                    if (sf_indices[mid] < sample) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                if (lo < cl_end && sf_indices[lo] == sample) {
+                    in_active = true;
+                }
+            }
+
+            if (in_active) {
+                // For one-hot clusters, sf_cumsum = 1 when active
+                overlap_sum += metal::min(ff_val, 1.0f);
+                inverse_overlap_nonzero_sum += metal::min(1.0f - ff_val, 1.0f);
+                n_active_with_nonzero_ff++;
+            }
+        }
+
+        // Samples in active set with ff=0 contribute 1.0 to inverse_overlap
+        int n_active_with_zero_ff = total_active - n_active_with_nonzero_ff;
+        float inverse_overlap_total = inverse_overlap_nonzero_sum + (float)n_active_with_zero_ff;
+
+        // Store results for this cumsum level
+        uint out_idx = ff_idx * n_clusters + cumsum_idx;
+        overlaps[out_idx] = overlap_sum;
+        inverse_overlaps[out_idx] = inverse_overlap_total;
+    }
+    """
+
+    kernel = mx.fast.metal_kernel(
+        name="esccf_overlaps_and_inverse_f32",
+        input_names=["ff_data", "ff_indices", "ff_indptr",
+                     "sf_data", "sf_indices", "sf_indptr",
+                     "sort_orders",
+                     "n_fixed_features", "n_clusters"],
+        output_names=["overlaps", "inverse_overlaps"],
+        source=source,
+    )
+
+    _esccf_overlaps_kernel_f32 = kernel
+    return kernel
+
+
+def identify_max_ESSs_overlaps_mlx(
+    fixed_features,
+    secondary_features,
+    sort_orders,
+    sample_cardinality,
+    n_fixed_features,
+    n_clusters,
+    use_float64=False,
+):
+    """
+    MLX Metal kernel for ES_CCF overlap computation with per-feature sort orders.
+
+    This function computes min(ff[i], cumsum(sf[:, sort_order[i]])[:, j]) for each
+    (i, j) combination, where the cumsum is computed according to each feature's
+    unique sort order.
+
+    Parameters:
+        fixed_features: scipy.sparse CSC matrix of fixed features (n_samples x n_fixed_features)
+        secondary_features: scipy.sparse CSC matrix of secondary features (n_samples x n_clusters)
+        sort_orders: numpy array of shape (n_fixed_features, n_clusters) with cluster orderings
+        sample_cardinality: number of samples (rows)
+        n_fixed_features: number of fixed features (columns in fixed_features)
+        n_clusters: number of clusters (should be n_clusters, after removing last)
+        use_float64: If True, raises error (Metal doesn't support float64)
+
+    Returns:
+        (overlaps, inverse_overlaps): Both numpy arrays of shape (n_fixed_features, n_clusters)
+    """
+    import mlx.core as mx
+
+    # Metal GPUs don't support float64
+    if use_float64:
+        raise ValueError(
+            "float64 is not supported on Metal GPUs (Apple Silicon). "
+            "Use esfs.configure(gpu=True, upcast=False) for float32."
+        )
+
+    np_dtype = np.float32
+    mx_dtype = mx.float32
+
+    # Convert scipy sparse CSC components to MLX arrays
+    ff_csc = fixed_features.tocsc()
+    sf_csc = secondary_features.tocsc()
+
+    ff_data = mx.array(ff_csc.data.astype(np_dtype))
+    ff_indices = mx.array(ff_csc.indices.astype(np.int32))
+    ff_indptr = mx.array(ff_csc.indptr.astype(np.int32))
+
+    sf_data = mx.array(sf_csc.data.astype(np_dtype))
+    sf_indices = mx.array(sf_csc.indices.astype(np.int32))
+    sf_indptr = mx.array(sf_csc.indptr.astype(np.int32))
+
+    # Sort orders array
+    sort_orders_mx = mx.array(sort_orders.astype(np.int32).ravel())
+
+    # Get kernel
+    kernel = get_esccf_overlaps_kernel()
+
+    # One thread per gene, 256 threads per group
+    threadgroup_size = (256, 1, 1)
+
+    # Execute kernel - 1D grid
+    outputs = kernel(
+        inputs=[ff_data, ff_indices, ff_indptr,
+                sf_data, sf_indices, sf_indptr,
+                sort_orders_mx,
+                mx.array(n_fixed_features, dtype=mx.int32),
+                mx.array(n_clusters, dtype=mx.int32)],
+        grid=(n_fixed_features, 1, 1),
+        threadgroup=threadgroup_size,
+        output_shapes=[(n_fixed_features, n_clusters),
+                       (n_fixed_features, n_clusters)],
+        output_dtypes=[mx_dtype, mx_dtype],
+    )
+
+    # Convert back to numpy
+    return np.array(outputs[0]), np.array(outputs[1])
