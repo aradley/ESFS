@@ -14,7 +14,7 @@ Datasets for reproducing the example workflows may be found at the following Men
 
 ### Installation (Paper Version)
 
-To install the exact version used in our paper:
+To install the exact version used in our paper (this will be frozen and executable upon publication, for now use the latest installation command below):
 
 ```
 pip install git+https://github.com/aradley/ESFS.git@v1.0.0
