@@ -10,6 +10,18 @@ import warnings
 
 import anndata as ad
 import multiprocess
+# Ensure Numba's thread pool matches the machine's actual core count.
+# This must be set before Numba is first imported; once the pool is created it cannot grow.
+import multiprocessing as _mp
+if "NUMBA_NUM_THREADS" not in os.environ:
+    os.environ["NUMBA_NUM_THREADS"] = str(_mp.cpu_count())
+else:
+    warnings.warn(
+        f"NUMBA_NUM_THREADS is already set to {os.environ['NUMBA_NUM_THREADS']} "
+        f"(by a previous Numba import or environment config). "
+        f"Numba's thread pool is fixed at this size and cannot be changed. "
+        f"To use more threads, set NUMBA_NUM_THREADS before importing ESFS."
+    )
 from numba import njit, prange, set_num_threads, get_num_threads
 import numpy as np
 from numpy.typing import ArrayLike
@@ -250,7 +262,7 @@ def parallel_calc_es_matrices(
         # Set number of threads for Numba parallel execution (CPU only)
         original_num_threads = get_num_threads()
         if not USING_GPU and use_cores > 0:
-            set_num_threads(use_cores)
+            set_num_threads(min(use_cores, original_num_threads))
 
         # Determine chunk size for progress bar (default: 5% of total features)
         n_features_total = len(feature_inds)
@@ -3207,7 +3219,7 @@ def parallel_replace_clust(
     """Wrapper using Numba prange (replaces multiprocessing.Pool)."""
     use_cores = get_num_cores(use_cores, silent=True)
     original_threads = get_num_threads()
-    set_num_threads(use_cores)
+    set_num_threads(min(use_cores, original_threads))
 
     try:
         # Ensure arrays are contiguous and correct dtype
