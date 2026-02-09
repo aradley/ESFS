@@ -12,15 +12,20 @@ import anndata as ad
 import multiprocess
 # Ensure Numba's thread pool matches the machine's actual core count.
 # This must be set before Numba is first imported; once the pool is created it cannot grow.
+import sys
 import multiprocessing as _mp
-if "NUMBA_NUM_THREADS" not in os.environ:
-    os.environ["NUMBA_NUM_THREADS"] = str(_mp.cpu_count())
+if 'numba' not in sys.modules:
+    # Numba not yet imported — safe to set the env var
+    if "NUMBA_NUM_THREADS" not in os.environ:
+        os.environ["NUMBA_NUM_THREADS"] = str(_mp.cpu_count())
 else:
+    # Numba already imported (e.g., by scanpy or another library in this session).
+    # Cannot modify NUMBA_NUM_THREADS — the thread pool is fixed.
+    from numba import config as _numba_config
     warnings.warn(
-        f"NUMBA_NUM_THREADS is already set to {os.environ['NUMBA_NUM_THREADS']} "
-        f"(by a previous Numba import or environment config). "
-        f"Numba's thread pool is fixed at this size and cannot be changed. "
-        f"To use more threads, set NUMBA_NUM_THREADS before importing ESFS."
+        f"Numba was already imported before ESFS. "
+        f"Thread pool is fixed at {_numba_config.NUMBA_NUM_THREADS} threads. "
+        f"To use all available CPU threads, import esfs before other Numba-dependent libraries, or, set NUMBA_NUM_THREADS in your environment before importing any Numba-dependent libraries."
     )
 from numba import njit, prange, set_num_threads, get_num_threads
 import numpy as np
