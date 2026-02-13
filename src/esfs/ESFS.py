@@ -27,6 +27,7 @@ else:
         f"Thread pool is fixed at {_numba_config.NUMBA_NUM_THREADS} threads. "
         f"To use all available CPU threads, import esfs before other Numba-dependent libraries, or, set NUMBA_NUM_THREADS in your environment before importing any Numba-dependent libraries."
     )
+import math
 from numba import njit, prange, set_num_threads, get_num_threads
 import numpy as np
 from numpy.typing import ArrayLike
@@ -558,38 +559,49 @@ def calc_es_metrics_vec(
     max_ent_options = arr_mod.array([max_ent_x_mm, max_ent_x_Mm, max_ent_x_mM, max_ent_x_MM])
     ######
     ## Calculate the overlap between the FF states and the secondary features
-    all_ESSs = []
-    all_EPs = []
-    all_SWs = []
-    all_SGs = []
-    overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup = get_overlap_info_vec(
-        fixed_features,
-        fixed_features_cardinality,
-        sample_cardinality,
-        feature_sums,
-        FF_QF_vs_RF,
-        njobs=None if num_cores == -1 else num_cores,
-    )
-
-    all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_chunked(
-        RFms,
-        QFms,
-        RFMs,
-        QFMs,
-        max_ent_options,
-        sample_cardinality,
-        overlaps,
-        inverse_overlaps,
-        case_idxs,
-        case_patterns,
-        overlap_lookup,
-        xp_mod=arr_mod,
-        chunksize=chunksize,
-    )
-    iden_feats, iden_cols = arr_mod.nonzero(all_ESSs == 1)
-    all_D_EPs[iden_feats, iden_cols] = 0
-    all_O_EPs[iden_feats, iden_cols] = 0
-    all_EPs = nanmaximum(all_D_EPs, all_O_EPs)
+    if not USING_GPU and not USING_MLX:
+        # CPU path: fused overlap + ESS kernel (single pass, no intermediate arrays)
+        case_idxs, case_patterns, overlap_lookup = _build_case_tables(
+            fixed_features_cardinality, sample_cardinality, feature_sums, FF_QF_vs_RF)
+        use_float64 = (backend.dtype == np.float64)
+        target_dtype = np.float64 if use_float64 else np.float32
+        ff_csc = fixed_features  # already CSC with sorted indices
+        ff_data = np.ascontiguousarray(ff_csc.data, dtype=target_dtype)
+        ff_indices = np.ascontiguousarray(ff_csc.indices, dtype=np.int32)
+        ff_indptr = np.ascontiguousarray(ff_csc.indptr, dtype=np.int32)
+        gs_data = np.ascontiguousarray(global_scaled_matrix.data, dtype=target_dtype)
+        gs_indices = np.ascontiguousarray(global_scaled_matrix.indices, dtype=np.int32)
+        gs_indptr = np.ascontiguousarray(global_scaled_matrix.indptr, dtype=np.int32)
+        all_ESSs, all_EPs, all_SWs, all_SGs = _fused_overlap_ess_numba(
+            ff_data, ff_indices, ff_indptr,
+            gs_data, gs_indices, gs_indptr,
+            fixed_features.shape[1], global_scaled_matrix.shape[1],
+            RFms, QFms, RFMs, QFMs, max_ent_options,
+            sample_cardinality,
+            case_idxs, case_patterns, overlap_lookup,
+        )
+        target = backend.dtype
+        all_ESSs = all_ESSs.astype(target)
+        all_EPs = all_EPs.astype(target)
+        all_SWs = all_SWs.astype(target)
+        all_SGs = all_SGs.astype(target)
+    else:
+        # GPU/MLX path: separate overlap computation + vectorized ESS
+        overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup = get_overlap_info_vec(
+            fixed_features, fixed_features_cardinality, sample_cardinality,
+            feature_sums, FF_QF_vs_RF,
+            njobs=None if num_cores == -1 else num_cores,
+        )
+        all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_chunked(
+            RFms, QFms, RFMs, QFMs, max_ent_options,
+            sample_cardinality, overlaps, inverse_overlaps,
+            case_idxs, case_patterns, overlap_lookup,
+            xp_mod=arr_mod, chunksize=chunksize,
+        )
+        iden_feats, iden_cols = arr_mod.nonzero(all_ESSs == 1)
+        all_D_EPs[iden_feats, iden_cols] = 0
+        all_O_EPs[iden_feats, iden_cols] = 0
+        all_EPs = nanmaximum(all_D_EPs, all_O_EPs)
     return all_ESSs, all_EPs, all_SWs, all_SGs
 
 
@@ -965,6 +977,495 @@ def overlaps_and_inverse_sparse(
             gs_data, gs_indices, gs_indptr,
             n_samples, n_fixed_features, n_features,
         )
+
+
+@njit(inline='always')
+def _safe_plogp(x):
+    """Compute x * log(x), with convention 0*log(0) = 0."""
+    if x <= 0.0:
+        return 0.0
+    return x * math.log(x)
+
+
+@njit(inline='always')
+def _safe_wbe(W, a, Ts):
+    """Weighted binary entropy: -(W/Ts) * [p*log(p) + (1-p)*log(1-p)] where p = a/W."""
+    if W <= 0.0 or Ts <= 0.0:
+        return 0.0
+    p = a / W
+    q = 1.0 - p
+    return -(W / Ts) * (_safe_plogp(p) + _safe_plogp(q))
+
+
+@njit(parallel=True)
+def _calc_ess_numba(RFms, QFms, RFMs, QFMs, max_ent_options,
+                    sample_cardinality, overlaps, inverse_overlaps,
+                    case_idxs, case_patterns, overlap_lookup):
+    """Numba-parallel ESS computation fusing ESE1-4, metrics, and curve selection.
+
+    Replaces calc_ESSs_vec + common_ES_metrics_batched + post-processing in a
+    single parallel loop. All internal arithmetic uses float64 for precision.
+
+    Returns
+    -------
+    ESSs, EPs, SWs, SGs : ndarray, shape (n_feats, n_comps), dtype float64
+    """
+    n_feats = RFms.shape[0]
+    n_comps = RFms.shape[1]
+    Ts = float(sample_cardinality)
+
+    out_ESSs = np.full((n_feats, n_comps), np.nan, dtype=np.float64)
+    out_EPs = np.full((n_feats, n_comps), np.nan, dtype=np.float64)
+    out_SWs = np.full((n_feats, n_comps), np.nan, dtype=np.float64)
+    out_SGs = np.full((n_feats, n_comps), np.nan, dtype=np.float64)
+
+    for idx in prange(n_feats * n_comps):
+        i = idx // n_comps
+        j = idx % n_comps
+        cidx = case_idxs[i, j]
+
+        # Pre-compute values invariant across curves
+        rfm = float(RFms[i, j])
+        qfm = float(QFms[i, j])
+        rfM = float(RFMs[i, j])
+        qfM = float(QFMs[i, j])
+        ind_E = -_safe_plogp(qfm / Ts) - _safe_plogp(qfM / Ts)
+
+        best_abs_ess = -1.0
+        best_ess = np.nan
+        best_ep = np.nan
+        best_sw = np.nan
+        best_sg = np.nan
+
+        for curve in range(4):
+            cp = case_patterns[cidx, curve]
+            if cp == 0:
+                continue
+
+            # Get overlap value
+            ol_src = overlap_lookup[cidx, curve]
+            if ol_src == 0:
+                x = float(overlaps[i, j])
+            else:
+                x = float(inverse_overlaps[i, j])
+
+            max_ent_x = float(max_ent_options[curve, i, j])
+
+            # Sort direction
+            if x < max_ent_x:
+                SD = -1.0
+            else:
+                SD = 1.0
+
+            # --- Conditional entropy (CE) ---
+            if curve == 0:
+                CE = _safe_wbe(rfm, x, Ts) + _safe_wbe(rfM, qfm - x, Ts)
+            elif curve == 1:
+                CE = _safe_wbe(rfm, x, Ts) + _safe_wbe(rfM, rfM - qfM + x, Ts)
+            elif curve == 2:
+                CE = _safe_wbe(rfm, qfm - x, Ts) + _safe_wbe(rfM, x, Ts)
+            else:
+                CE = _safe_wbe(rfm, rfm - qfM + x, Ts) + _safe_wbe(rfM, rfM - x, Ts)
+
+            # --- Minimum entropy (depends on curve and SD) ---
+            if curve == 0:
+                if SD < 0:
+                    min_E = _safe_wbe(rfM, qfm, Ts)
+                else:
+                    min_E = _safe_wbe(rfM, qfm - rfm, Ts)
+            elif curve == 1:
+                if SD < 0:
+                    min_E = _safe_wbe(rfM, rfM - qfM, Ts)
+                else:
+                    min_E = _safe_wbe(rfM, rfM - qfM + rfm, Ts)
+            elif curve == 2:
+                min_ov = rfM - qfM
+                if SD < 0:
+                    min_E = _safe_wbe(rfM, min_ov, Ts)
+                else:
+                    min_E = _safe_wbe(rfM, rfM - qfM + rfm, Ts)
+            else:
+                min_ov_3 = qfM - rfm
+                max_ov_3 = min(qfM, rfM)
+                if SD < 0:
+                    min_E = _safe_wbe(rfM, rfM - min_ov_3, Ts)
+                else:
+                    min_E = _safe_wbe(rfM, rfM - max_ov_3, Ts)
+
+            # NaN guards (matching original vectorized code)
+            if math.isnan(min_E):
+                min_E = 0.0
+            if math.isnan(CE):
+                CE = min_E
+
+            # --- Overlap bounds ---
+            if curve == 0:
+                min_overlap = 0.0
+                max_overlap = rfm
+            elif curve == 1:
+                min_overlap = 0.0
+                max_overlap = min(rfm, qfM)
+            elif curve == 2:
+                min_overlap = rfM - qfM
+                max_overlap = min(qfm, rfM)
+            else:
+                min_overlap = qfM - rfm
+                max_overlap = min(qfM, rfM)
+
+            # --- D and O ---
+            if curve == 0:
+                if SD < 0:
+                    D = x
+                    O = Ts - rfm - qfm + x
+                else:
+                    D = rfm - x
+                    O = qfm - x
+            elif curve == 1:
+                if SD < 0:
+                    D = x
+                    O = qfm - rfm + x
+                else:
+                    D = rfm - x
+                    O = qfM - x
+            elif curve == 2:
+                if SD < 0:
+                    D = qfM - rfM + x
+                    O = x
+                else:
+                    D = qfm - x
+                    O = rfM - x
+            else:
+                if SD < 0:
+                    D = x - (Ts - qfm - rfm)
+                    O = x
+                else:
+                    D = qfM - x
+                    O = rfM - x
+
+            # --- SW, SG, ESS ---
+            if ind_E != 0.0:
+                SW = (ind_E - min_E) / ind_E
+            else:
+                SW = 0.0
+
+            denom_sg = ind_E - min_E
+            if denom_sg != 0.0:
+                SG = (ind_E - CE) / denom_sg
+            else:
+                SG = 0.0
+
+            if SG < 0.0:
+                SG = 0.0
+            elif SG > 1.0:
+                SG = 1.0
+
+            ESS = SW * SG * SD * float(cp)
+
+            # --- EP metrics ---
+            ind_X_neg = max_ent_x - min_overlap
+            ind_X_pos = max_overlap - max_ent_x
+
+            if SD < 0:
+                ind_ent = ind_E / ind_X_neg if ind_X_neg != 0.0 else 0.0
+            else:
+                ind_ent = ind_E / ind_X_pos if ind_X_pos != 0.0 else 0.0
+
+            D_EP = ((CE - min_E) / D) - ind_ent if D != 0.0 else math.nan
+            O_EP = (CE / O) - ind_ent if O != 0.0 else math.nan
+
+            # ESS == 1 means identical features; EPs are 0
+            if ESS == 1.0:
+                D_EP = 0.0
+                O_EP = 0.0
+
+            # Inline nanmaximum: treat NaN/inf as -inf, both bad → NaN
+            d_ok = not (math.isnan(D_EP) or math.isinf(D_EP))
+            o_ok = not (math.isnan(O_EP) or math.isinf(O_EP))
+            if d_ok and o_ok:
+                EP = max(D_EP, O_EP)
+            elif d_ok:
+                EP = D_EP
+            elif o_ok:
+                EP = O_EP
+            else:
+                EP = math.nan
+
+            # --- Select best curve by max |ESS| ---
+            abs_ess = abs(ESS)
+            if not math.isnan(abs_ess) and abs_ess > best_abs_ess:
+                best_abs_ess = abs_ess
+                best_ess = ESS
+                best_ep = EP
+                best_sw = SW
+                best_sg = SG
+
+        out_ESSs[i, j] = best_ess
+        out_EPs[i, j] = best_ep
+        out_SWs[i, j] = best_sw
+        out_SGs[i, j] = best_sg
+
+    return out_ESSs, out_EPs, out_SWs, out_SGs
+
+
+def _build_case_tables(ff_cardinality, sample_cardinality, feature_sums, FF_QF_vs_RF):
+    """Build case_idxs, case_patterns, and overlap_lookup tables for ESS computation."""
+    ff_is_min = (ff_cardinality < (sample_cardinality / 2))[:, None]
+    sf_is_min = (feature_sums < (sample_cardinality / 2))[None, :]
+    case_patterns = np.array([
+        [0, -1, 0, 1],
+        [0, 0, -1, 1],
+        [-1, 0, 1, 0],
+        [-1, 1, 0, 0],
+        [0, 1, 0, -1],
+        [0, 0, 1, -1],
+        [1, 0, -1, 0],
+        [1, -1, 0, 0],
+    ], dtype=np.int8)
+    case_idxs = (
+        (ff_is_min.astype(int) << 2) + (sf_is_min.astype(int) << 1) + FF_QF_vs_RF.astype(int)
+    ).astype(np.int8)
+    row_map = np.stack(
+        [np.argmax(case_patterns, axis=1), np.argmin(case_patterns, axis=1)],
+        axis=1,
+    ).astype(np.int8)
+    overlap_lookup = np.full((8, 4), -1, dtype=np.int8)
+    np.put_along_axis(overlap_lookup, row_map, [0, 1], axis=1)
+    return case_idxs, case_patterns, overlap_lookup
+
+
+@njit(parallel=True)
+def _fused_overlap_ess_numba(
+    ff_data, ff_indices, ff_indptr,
+    gs_data, gs_indices, gs_indptr,
+    n_fixed_features, n_features,
+    RFms, QFms, RFMs, QFMs, max_ent_options,
+    sample_cardinality,
+    case_idxs, case_patterns, overlap_lookup,
+):
+    """Fused overlap + ESS kernel: two-pointer merge and ESS in a single pass.
+
+    Eliminates intermediate overlap arrays entirely. Overlap scalars stay in
+    registers and are immediately consumed by the ESS computation.
+
+    Returns
+    -------
+    ESSs, EPs, SWs, SGs : ndarray, shape (n_fixed_features, n_features), dtype float64
+    """
+    n_feats = n_fixed_features
+    n_comps = n_features
+    Ts = float(sample_cardinality)
+
+    out_ESSs = np.full((n_feats, n_comps), np.nan, dtype=np.float64)
+    out_EPs = np.full((n_feats, n_comps), np.nan, dtype=np.float64)
+    out_SWs = np.full((n_feats, n_comps), np.nan, dtype=np.float64)
+    out_SGs = np.full((n_feats, n_comps), np.nan, dtype=np.float64)
+
+    for idx in prange(n_feats * n_comps):
+        i = idx // n_comps
+        j = idx % n_comps
+
+        # ===== Two-pointer merge (overlap + inverse_overlap) =====
+        ff_start = ff_indptr[i]
+        ff_end = ff_indptr[i + 1]
+        gs_start = gs_indptr[j]
+        gs_end = gs_indptr[j + 1]
+
+        overlap_sum = 0.0
+        inverse_overlap_sum = 0.0
+        ff_ptr = ff_start
+        gs_ptr = gs_start
+
+        while ff_ptr < ff_end and gs_ptr < gs_end:
+            ff_row = ff_indices[ff_ptr]
+            gs_row = gs_indices[gs_ptr]
+            if ff_row == gs_row:
+                ff_val = float(ff_data[ff_ptr])
+                gs_val = float(gs_data[gs_ptr])
+                overlap_sum += min(ff_val, gs_val)
+                inverse_overlap_sum += min(1.0 - ff_val, gs_val)
+                ff_ptr += 1
+                gs_ptr += 1
+            elif ff_row < gs_row:
+                ff_ptr += 1
+            else:
+                inverse_overlap_sum += float(gs_data[gs_ptr])
+                gs_ptr += 1
+        while gs_ptr < gs_end:
+            inverse_overlap_sum += float(gs_data[gs_ptr])
+            gs_ptr += 1
+
+        # ===== ESS computation using register-local overlap scalars =====
+        cidx = case_idxs[i, j]
+
+        # Pre-compute values invariant across curves
+        rfm = float(RFms[i, j])
+        qfm = float(QFms[i, j])
+        rfM = float(RFMs[i, j])
+        qfM = float(QFMs[i, j])
+        ind_E = -_safe_plogp(qfm / Ts) - _safe_plogp(qfM / Ts)
+
+        best_abs_ess = -1.0
+        best_ess = np.nan
+        best_ep = np.nan
+        best_sw = np.nan
+        best_sg = np.nan
+
+        for curve in range(4):
+            cp = case_patterns[cidx, curve]
+            if cp == 0:
+                continue
+
+            ol_src = overlap_lookup[cidx, curve]
+            if ol_src == 0:
+                x = overlap_sum
+            else:
+                x = inverse_overlap_sum
+
+            max_ent_x = float(max_ent_options[curve, i, j])
+
+            if x < max_ent_x:
+                SD = -1.0
+            else:
+                SD = 1.0
+
+            if curve == 0:
+                CE = _safe_wbe(rfm, x, Ts) + _safe_wbe(rfM, qfm - x, Ts)
+            elif curve == 1:
+                CE = _safe_wbe(rfm, x, Ts) + _safe_wbe(rfM, rfM - qfM + x, Ts)
+            elif curve == 2:
+                CE = _safe_wbe(rfm, qfm - x, Ts) + _safe_wbe(rfM, x, Ts)
+            else:
+                CE = _safe_wbe(rfm, rfm - qfM + x, Ts) + _safe_wbe(rfM, rfM - x, Ts)
+
+            if curve == 0:
+                if SD < 0:
+                    min_E = _safe_wbe(rfM, qfm, Ts)
+                else:
+                    min_E = _safe_wbe(rfM, qfm - rfm, Ts)
+            elif curve == 1:
+                if SD < 0:
+                    min_E = _safe_wbe(rfM, rfM - qfM, Ts)
+                else:
+                    min_E = _safe_wbe(rfM, rfM - qfM + rfm, Ts)
+            elif curve == 2:
+                min_ov = rfM - qfM
+                if SD < 0:
+                    min_E = _safe_wbe(rfM, min_ov, Ts)
+                else:
+                    min_E = _safe_wbe(rfM, rfM - qfM + rfm, Ts)
+            else:
+                min_ov_3 = qfM - rfm
+                max_ov_3 = min(qfM, rfM)
+                if SD < 0:
+                    min_E = _safe_wbe(rfM, rfM - min_ov_3, Ts)
+                else:
+                    min_E = _safe_wbe(rfM, rfM - max_ov_3, Ts)
+
+            if math.isnan(min_E):
+                min_E = 0.0
+            if math.isnan(CE):
+                CE = min_E
+
+            if curve == 0:
+                min_overlap = 0.0
+                max_overlap = rfm
+            elif curve == 1:
+                min_overlap = 0.0
+                max_overlap = min(rfm, qfM)
+            elif curve == 2:
+                min_overlap = rfM - qfM
+                max_overlap = min(qfm, rfM)
+            else:
+                min_overlap = qfM - rfm
+                max_overlap = min(qfM, rfM)
+
+            if curve == 0:
+                if SD < 0:
+                    D = x
+                    O = Ts - rfm - qfm + x
+                else:
+                    D = rfm - x
+                    O = qfm - x
+            elif curve == 1:
+                if SD < 0:
+                    D = x
+                    O = qfm - rfm + x
+                else:
+                    D = rfm - x
+                    O = qfM - x
+            elif curve == 2:
+                if SD < 0:
+                    D = qfM - rfM + x
+                    O = x
+                else:
+                    D = qfm - x
+                    O = rfM - x
+            else:
+                if SD < 0:
+                    D = x - (Ts - qfm - rfm)
+                    O = x
+                else:
+                    D = qfM - x
+                    O = rfM - x
+
+            if ind_E != 0.0:
+                SW = (ind_E - min_E) / ind_E
+            else:
+                SW = 0.0
+
+            denom_sg = ind_E - min_E
+            if denom_sg != 0.0:
+                SG = (ind_E - CE) / denom_sg
+            else:
+                SG = 0.0
+
+            if SG < 0.0:
+                SG = 0.0
+            elif SG > 1.0:
+                SG = 1.0
+
+            ESS = SW * SG * SD * float(cp)
+
+            ind_X_neg = max_ent_x - min_overlap
+            ind_X_pos = max_overlap - max_ent_x
+
+            if SD < 0:
+                ind_ent = ind_E / ind_X_neg if ind_X_neg != 0.0 else 0.0
+            else:
+                ind_ent = ind_E / ind_X_pos if ind_X_pos != 0.0 else 0.0
+
+            D_EP = ((CE - min_E) / D) - ind_ent if D != 0.0 else math.nan
+            O_EP = (CE / O) - ind_ent if O != 0.0 else math.nan
+
+            if ESS == 1.0:
+                D_EP = 0.0
+                O_EP = 0.0
+
+            d_ok = not (math.isnan(D_EP) or math.isinf(D_EP))
+            o_ok = not (math.isnan(O_EP) or math.isinf(O_EP))
+            if d_ok and o_ok:
+                EP = max(D_EP, O_EP)
+            elif d_ok:
+                EP = D_EP
+            elif o_ok:
+                EP = O_EP
+            else:
+                EP = math.nan
+
+            abs_ess = abs(ESS)
+            if not math.isnan(abs_ess) and abs_ess > best_abs_ess:
+                best_abs_ess = abs_ess
+                best_ess = ESS
+                best_ep = EP
+                best_sw = SW
+                best_sg = SG
+
+        out_ESSs[i, j] = best_ess
+        out_EPs[i, j] = best_ep
+        out_SWs[i, j] = best_sw
+        out_SGs[i, j] = best_sg
+
+    return out_ESSs, out_EPs, out_SWs, out_SGs
 
 
 def calc_ESSs_chunked(
@@ -1995,7 +2496,7 @@ def ES_CCF(adata, secondary_features_label, use_cores: int = -1, chunksize: Opti
         )
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
-    global_scaled_matrix = adata.layers["Scaled_Counts"]
+    global_scaled_matrix = _convert_sparse_array(adata.layers["Scaled_Counts"])
     ### Extract the secondary_features object from adata
     secondary_features = adata.obsm[secondary_features_label]
     # Ensure sparse csc matrix with appropriate backend
@@ -2434,27 +2935,12 @@ def identify_max_ESSs_vec(FF_inds, secondary_features, sorted_SGs_idxs, chunksiz
             all_FF_QF_vs_RF,
         )
     )
-    # Having extracted the overlaps, calculate the ESS and EPs using chunked computation
-    all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_chunked(
-        RFms,
-        QFms,
-        RFMs,
-        QFMs,
-        max_ent_options,
-        sample_cardinality,
-        overlaps,
-        inverse_overlaps,
-        case_idxs,
-        case_patterns,
-        overlap_lookup,
-        xp_mod=np,
-        chunksize=chunksize,
+    # Calculate ESS and EPs using fused Numba kernel (CPU-only path)
+    all_ESSs, all_EPs, _, _ = _calc_ess_numba(
+        RFms, QFms, RFMs, QFMs, max_ent_options,
+        sample_cardinality, overlaps, inverse_overlaps,
+        case_idxs, case_patterns, overlap_lookup,
     )
-    # Postprocess EPs
-    iden_feats, iden_cols = np.nonzero(all_ESSs == 1)
-    all_D_EPs[iden_feats, iden_cols] = 0
-    all_O_EPs[iden_feats, iden_cols] = 0
-    all_EPs = nanmaximum(all_D_EPs, all_O_EPs)
     return all_ESSs, all_EPs
 
 

@@ -21,12 +21,21 @@ def _try_load_cupy():
         # Check if CUDA is available (may vary on HPC partitions)
         try:
             if _xp.cuda.is_available():
+                # Smoke test: force cusparse lazy loading now so a missing
+                # libcusparse.so is caught here rather than at runtime.
+                _m = _xpsparse.csc_matrix(_xp.eye(2, dtype=_xp.float32))
+                _m.sum()
                 return _xp, _xpsparse, True
             else:
                 return np, spsparse, False
         # cupy.cuda.is_available() can raise exceptions (fixed in cupy v14)
         # https://github.com/cupy/cupy/pull/9420
-        except Exception:
+        except Exception as e:
+            warnings.warn(
+                f"CuPy is installed but CUDA libraries don't appear to be fully available: {e}. "
+                f"Falling back to CPU. To use GPU, ensure CUDA toolkit is loaded "
+                f"(e.g. 'module load cuda' on HPC)."
+            )
             return np, spsparse, False
     except ImportError:
         return np, spsparse, False

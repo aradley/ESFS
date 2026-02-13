@@ -174,6 +174,8 @@ def knn_smooth_gene_expression(
                 chunk = chunk.toarray()
             elif xpsparse.issparse(chunk):
                 chunk = chunk.toarray().get()
+            elif hasattr(chunk, 'toarray'):
+                chunk = chunk.toarray()
             chunk = np.ascontiguousarray(chunk, dtype=np.float64)
 
             # Transform chunk in-place if needed
@@ -229,6 +231,8 @@ def knn_smooth_gene_expression(
                 chunk = chunk.toarray()
             elif xpsparse.issparse(chunk):
                 chunk = chunk.toarray().get()
+            elif hasattr(chunk, 'toarray'):
+                chunk = chunk.toarray()
             chunk = np.ascontiguousarray(chunk, dtype=np.float64)
 
             # Transform chunk in-place if needed
@@ -525,7 +529,13 @@ def get_gene_cluster_cell_UMAPs(
             continue
         gene_cluster_selected_genes.append(selected_genes)
         # xp.save(path + "Saved_ESFS_Genes.npy",xp.asarray(selected_genes))
-        reduced_input_data = adata[:, selected_genes].X.A.copy()
+        X = adata[:, selected_genes].X
+        if spsparse.issparse(X):
+            reduced_input_data = X.toarray()
+        elif hasattr(X, 'toarray'):
+            reduced_input_data = np.asarray(X.toarray())
+        else:
+            reduced_input_data = np.asarray(X)
         if log_transformed:
             reduced_input_data = np.log2(reduced_input_data + 1)
         #
@@ -600,6 +610,8 @@ def plot_gene_cluster_cell_UMAPs(
         elif xpsparse.issparse(expression):
             # If we reach this, it must be a cupy sparse array so we can .get() directly
             expression = expression.toarray().get()
+        elif hasattr(expression, 'toarray'):
+            expression = expression.toarray()
         expression = expression.squeeze()
         if log2_gene_expression:
             expression = np.log2(expression + 1)
