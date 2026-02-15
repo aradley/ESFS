@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
-from scipy.spatial.distance import cdist
 import scipy.sparse as spsparse
 from sklearn.cluster import KMeans, HDBSCAN
 import umap
@@ -63,28 +62,6 @@ def _normalize_rows(X):
                 X_norm[i, j] = 0.0
 
     return X_norm
-
-
-def _find_knn_from_correlations(correlations, knn):
-    """Find k-nearest neighbors from pre-computed correlation matrix.
-
-    Uses numpy's argpartition for O(n) partial sort instead of O(n log n) full sort.
-
-    Parameters:
-        correlations: (n_cells, n_cells) correlation matrix
-        knn: number of neighbors
-
-    Returns:
-        neighbors: (n_cells, knn) array of neighbor indices
-    """
-    # Convert correlations to distances (1 - correlation)
-    distances = 1.0 - correlations
-
-    # Use argpartition for efficient k-smallest selection (O(n) vs O(n log n) for argsort)
-    # argpartition puts the k smallest elements in the first k positions (unordered)
-    neighbors = np.argpartition(distances, kth=knn, axis=1)[:, :knn]
-
-    return neighbors
 
 
 @numba.njit(fastmath=True)
