@@ -152,6 +152,14 @@ def _convert_sparse_array(arr, to_scipy: bool = False):
     except ImportError:
         pass
 
+    # If caller wants scipy output, short-circuit: never convert to CuPy
+    if to_scipy:
+        if is_cupy_sparse:
+            arr = arr.get()  # CuPy sparse → scipy sparse
+        if not spsparse.issparse(arr):
+            arr = spsparse.csc_matrix(arr)
+        return arr.tocsc()
+
     # If CuPy sparse and we're on CPU, convert to scipy sparse first
     if is_cupy_sparse and not USING_GPU:
         arr = arr.get()  # Convert CuPy sparse to scipy sparse
@@ -178,9 +186,6 @@ def _convert_sparse_array(arr, to_scipy: bool = False):
         # Ensure underlying array is on correct device/backend before sparsifying
         arr = xp.asarray(arr)
         arr = xpsparse.csc_matrix(arr)
-    # If user wants scipy sparse output, convert back
-    if to_scipy and USING_GPU:
-        arr = arr.get()
     return arr
 
 def parallel_calc_es_matrices(

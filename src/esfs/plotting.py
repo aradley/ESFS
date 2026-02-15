@@ -329,7 +329,7 @@ def ES_rank_genes(
     norm_network_feature_weights = feature_weights / sig_genes_per_gene
     ##
     sorted_indices = xp.argsort(-norm_network_feature_weights)
-    if known_important_genes.shape[0] > 0:
+    if known_important_genes is not None and known_important_genes.shape[0] > 0:
         # print(used_features == list(used_features_d_names.keys()))
         # Get sorted indices by descending norm_network_feature_weights
         # Map sorted indices to gene names using used_features_idxs
@@ -460,7 +460,7 @@ def plot_top_ranked_genes_UMAP(
             "Clustering must be None/'None', an integer value for KMeans clustering, or 'hdbscan' for automated density clustering."
         )
     #
-    if known_important_genes.shape[0] > 0:
+    if known_important_genes is not None and known_important_genes.shape[0] > 0:
         important_gene_idxs = top_ESS_genes.get_indexer(known_important_genes)
         # NOTE: If known_important_genes are not in top_ESS_genes, important_gene_idxs will be -1
         plt.scatter(

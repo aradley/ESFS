@@ -25,6 +25,9 @@ def _try_load_cupy():
                 # libcusparse.so is caught here rather than at runtime.
                 _m = _xpsparse.csc_matrix(_xp.eye(2, dtype=_xp.float32))
                 _m.sum()
+                # Also test scipy→CuPy sparse path (may use different cusparse codepath)
+                _m2 = _xpsparse.csr_matrix(spsparse.eye(2, dtype=np.float32, format='csr'))
+                del _m, _m2
                 return _xp, _xpsparse, True
             else:
                 return np, spsparse, False
