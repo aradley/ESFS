@@ -81,30 +81,29 @@ def _ensure_numpy(arr):
 # requested ES metrics against each variable/feature in the adata object, and adds them as an attribute to the object for later use.
 
 
-def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
+def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False, Min_Total_Expression = 50):
     """
     Prior to calculates ES metrics, the data will be scaled to have values
     between 0 and 1.
     """
-    # Although we expect adata.X to be sparse, as we call getnnz, need to convert if not
-    # Ensure scipy due to cupy getnnz issue
-    adata.X = _convert_sparse_array(adata.X, to_scipy=True)
+    # Convert to scipy CSC for getnnz (local variable to avoid mutating adata.X on views)
+    X_scipy = _convert_sparse_array(adata.X, to_scipy=True)
     # Filter genes with no expression
-    # NOTE: Using numpy easier here, it isn't performance-critical code
-    keep_genes = adata.var_names[np.nonzero(adata.X.getnnz(axis=0) > 50)[0]]
+    keep_genes = adata.var_names[np.nonzero(X_scipy.getnnz(axis=0) > Min_Total_Expression)[0]]
     if keep_genes.shape[0] < adata.shape[1]:
         print(
             str(adata.shape[1] - keep_genes.shape[0])
             + " genes show no expression. Removing them from adata object"
         )
-        adata = adata[:, keep_genes]
-    # Convert to CSC sparse matrix for processing using appropriate backend
-    scaled_expressions = _convert_sparse_array(adata.X.copy())
+        adata = adata[:, keep_genes].copy()
+    # Work on CPU (scipy CSC) for percentile computation -- GPU kernel launch
+    # overhead makes GPU counterproductive for this one-time preprocessing step
+    scaled_expressions = _convert_sparse_array(adata.X.copy(), to_scipy=True)
     if log_scale:
-        scaled_expressions.data = xp.log2(scaled_expressions.data + 1)
-    # Iterate through each gene
+        scaled_expressions.data = np.log2(scaled_expressions.data + 1)
+    # Compute per-gene clipping thresholds
     n_rows, n_cols = scaled_expressions.shape
-    upper = xp.zeros(n_cols, dtype=xp.float64)
+    upper = np.zeros(n_cols, dtype=np.float64)
     for col_idx in range(n_cols):
         start_idx = scaled_expressions.indptr[col_idx]
         end_idx = scaled_expressions.indptr[col_idx + 1]
@@ -117,29 +116,24 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False):
             target_rank = (clip_percentile / 100) * n_rows
             if target_rank <= n_zeros:
                 # It would be 0, so we take the max and continue
-                upper[col_idx] = xp.max(col_data)
+                upper[col_idx] = np.max(col_data)
                 continue
             # Lazily pad with zeros to replicate full column
-            # NOTE: If memory becomes an issue, can adjust percentile based on sparsity
-            col_data = xp.concatenate((xp.zeros(n_zeros, dtype=col_data.dtype), col_data))
-            upper[col_idx] = xp.percentile(col_data, clip_percentile)
+            col_data = np.concatenate((np.zeros(n_zeros, dtype=col_data.dtype), col_data))
+            upper[col_idx] = np.percentile(col_data, clip_percentile)
             if upper[col_idx] == 0:
-                upper[col_idx] = xp.max(col_data)
+                upper[col_idx] = np.max(col_data)
         # Fallback to avoid division by zero
         else:
             upper[col_idx] = 1.0
-    # Build a mapping from data index to column index
-    col_indices = xp.zeros(len(scaled_expressions.data), dtype=xp.int32)
-    for col_idxs in range(n_cols):
-        start_idx = scaled_expressions.indptr[col_idxs]
-        end_idx = scaled_expressions.indptr[col_idxs + 1]
-        col_indices[start_idx:end_idx] = col_idxs
+    # Map each nonzero entry to its column index (vectorized)
+    col_indices = np.repeat(np.arange(n_cols, dtype=np.int32), np.diff(scaled_expressions.indptr))
     upper_broadcast = upper[col_indices]
     # Clip and scale
-    scaled_expressions.data = xp.minimum(scaled_expressions.data, upper_broadcast)
+    scaled_expressions.data = np.minimum(scaled_expressions.data, upper_broadcast)
     scaled_expressions.data = scaled_expressions.data / upper_broadcast
     # Store as float32 to save memory (values are 0-1, so float32 precision is sufficient)
-    adata.layers["Scaled_Counts"] = scaled_expressions.astype(xp.float32)
+    adata.layers["Scaled_Counts"] = scaled_expressions.astype(np.float32)
     return adata
 
 def _convert_sparse_array(arr, to_scipy: bool = False):
