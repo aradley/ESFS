@@ -87,16 +87,24 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False, Min_Total
     """
     # Convert to scipy CSC for getnnz (local variable to avoid mutating adata.X on views)
     X_scipy = _convert_sparse_array(adata.X, to_scipy=True)
-    # Filter genes with no expression
-    keep_genes = adata.var_names[np.nonzero(X_scipy.getnnz(axis=0) > Min_Total_Expression)[0]]
-    if keep_genes.shape[0] < adata.shape[1]:
+    # Filter genes with low expression
+    gene_nnz = X_scipy.getnnz(axis=0)
+    keep_idx = np.nonzero(gene_nnz > Min_Total_Expression)[0]
+    if len(keep_idx) < adata.shape[1]:
         print(
-            str(adata.shape[1] - keep_genes.shape[0])
+            str(adata.shape[1] - len(keep_idx))
             + " genes show no expression. Removing them from adata object"
         )
-        # Set X to scipy version (materializes any view, ensures clean scipy for anndata indexing)
-        adata.X = X_scipy
-        adata = adata[:, keep_genes].copy()
+        # Bypass anndata view/copy — fails when _adata_ref.X is CuPy sparse.
+        # Subset the scipy matrix directly and build a standalone AnnData.
+        adata = ad.AnnData(
+            X=X_scipy[:, keep_idx],
+            obs=adata.obs.copy(),
+            var=adata.var.iloc[keep_idx].copy(),
+            obsm=dict(adata.obsm) if len(adata.obsm) > 0 else None,
+            uns=dict(adata.uns) if len(adata.uns) > 0 else None,
+            obsp=dict(adata.obsp) if len(adata.obsp) > 0 else None,
+        )
     # Work on CPU (scipy CSC) for percentile computation -- GPU kernel launch
     # overhead makes GPU counterproductive for this one-time preprocessing step
     scaled_expressions = _convert_sparse_array(adata.X.copy(), to_scipy=True)
