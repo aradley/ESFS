@@ -1970,11 +1970,11 @@ def ES_CCF(adata, secondary_features_label, use_cores: int = -1, chunksize: Opti
         )
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
-    global_scaled_matrix = _convert_sparse_array(adata.layers["Scaled_Counts"])
+    global_scaled_matrix = _convert_sparse_array(adata.layers["Scaled_Counts"], to_scipy=True)
     ### Extract the secondary_features object from adata
     secondary_features = adata.obsm[secondary_features_label]
-    # Ensure sparse csc matrix with appropriate backend
-    secondary_features = _convert_sparse_array(secondary_features)
+    # Ensure sparse csc matrix — force CPU since ES_CCF pipeline is CPU-only
+    secondary_features = _convert_sparse_array(secondary_features, to_scipy=True)
     ### Extract the secondary_features ESSs from adata (use numpy for ES_CCF)
     all_ESSs = np.asarray(adata.varm[secondary_features_label + "_ESSs"])
     initial_max_ESSs = np.max(all_ESSs, axis=1)
