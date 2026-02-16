@@ -94,9 +94,8 @@ def create_scaled_matrix(adata, clip_percentile=97.5, log_scale=False, Min_Total
             str(adata.shape[1] - keep_genes.shape[0])
             + " genes show no expression. Removing them from adata object"
         )
-        # Ensure X is scipy sparse before subsetting (anndata can't index CuPy sparse)
-        if not spsparse.issparse(adata.X):
-            adata.X = _convert_sparse_array(adata.X, to_scipy=True)
+        # Set X to scipy version (materializes any view, ensures clean scipy for anndata indexing)
+        adata.X = X_scipy
         adata = adata[:, keep_genes].copy()
     # Work on CPU (scipy CSC) for percentile computation -- GPU kernel launch
     # overhead makes GPU counterproductive for this one-time preprocessing step
