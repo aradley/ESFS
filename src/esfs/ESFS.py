@@ -31,7 +31,6 @@ from numba import njit, prange, set_num_threads, get_num_threads
 import numpy as np
 from numpy.typing import ArrayLike
 import pandas as pd
-from pathos.pools import ProcessPool
 from p_tqdm import p_map
 import scipy.sparse as spsparse
 from tqdm.auto import tqdm
@@ -597,7 +596,6 @@ def calc_es_metrics_vec(
         overlaps, inverse_overlaps, case_idxs, case_patterns, overlap_lookup = get_overlap_info_vec(
             fixed_features, fixed_features_cardinality, sample_cardinality,
             feature_sums, FF_QF_vs_RF,
-            njobs=None if num_cores == -1 else num_cores,
         )
         all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_chunked(
             RFms, QFms, RFMs, QFMs, max_ent_options,
@@ -613,7 +611,7 @@ def calc_es_metrics_vec(
 
 
 def get_overlap_info_vec(
-    fixed_features, fixed_features_cardinality, sample_cardinality, feature_sums, FF_QF_vs_RF, njobs
+    fixed_features, fixed_features_cardinality, sample_cardinality, feature_sums, FF_QF_vs_RF
 ):
     """
     For any pair of features the ES mathematical framework has a set of logical rules regarding how the ES metrics

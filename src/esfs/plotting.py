@@ -606,7 +606,8 @@ def get_gene_cluster_cell_UMAPs(
             print(
                 "  cuML not found — falling back to CPU (umap-learn). "
                 "For GPU-accelerated UMAP layout on CUDA, install cuML then restart Python:\n"
-                "    pip install \"cuml-cu12>=23.02\" --extra-index-url=https://pypi.nvidia.com"
+                "    pip install \"cuml-cu12>=23.02\" --extra-index-url=https://pypi.nvidia.com\n"
+                "  Note: cuML currently requires Python ≤3.11; it may not be available for Python 3.12+."
             )
 
     for lbl in unique_gene_clust_labels:
