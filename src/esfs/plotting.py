@@ -19,13 +19,15 @@ from .ESFS import _convert_sparse_array, move_to_gpu, convert_to_numpy
 xp = backend.xp
 xpsparse = backend.xpsparse
 USING_GPU = backend.using_gpu
+USING_MLX = backend.using_mlx
 # Whenever configure() is run, this updates the references
 def _update_module_backend():
     """Update module-level backend references. Called after configure()."""
-    global xp, xpsparse, USING_GPU
+    global xp, xpsparse, USING_GPU, USING_MLX
     xp = backend.xp
     xpsparse = backend.xpsparse
     USING_GPU = backend.using_gpu
+    USING_MLX = backend.using_mlx
 
 
 # Numba-accelerated KNN helper functions
