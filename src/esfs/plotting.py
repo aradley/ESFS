@@ -158,6 +158,22 @@ def _precompute_knn_correlation(X_dense, n_neighbors, memory_limit_gb=5.0):
     return knn_indices, knn_dists
 
 
+def _add_self_loops(knn_indices, knn_dists):
+    """Prepend self (index=i, dist=0.0) to each row — required by cuML UMAP.
+
+    cuML expects the first neighbour of each cell to be itself, whereas
+    _precompute_knn_correlation excludes self.  This converts the (n_cells, k)
+    arrays to (n_cells, k+1) with self prepended.
+    """
+    n_cells = knn_indices.shape[0]
+    self_idx = np.arange(n_cells, dtype=knn_indices.dtype)[:, np.newaxis]
+    self_dist = np.zeros((n_cells, 1), dtype=knn_dists.dtype)
+    return (
+        np.concatenate([self_idx, knn_indices], axis=1),
+        np.concatenate([self_dist, knn_dists], axis=1),
+    )
+
+
 @numba.njit(fastmath=True)
 def _smooth_expression_chunk(full_X, neighbors, start_idx, end_idx):
     """Smooth a chunk of cells by averaging over k neighbors.
@@ -623,15 +639,56 @@ def get_gene_cluster_cell_UMAPs(
             )
             precomputed_knn = (knn_indices, knn_dists)
         #
-        embedding_model = umap.UMAP(
-            n_neighbors=n_neighbors,
-            metric=metric,
-            min_dist=min_dist,
-            n_components=2,
-            random_state=random_state,  # UMAP uses None as default
-            precomputed_knn=precomputed_knn,
-            **kwargs,
-        ).fit(reduced_input_data)
+        if USING_GPU and precomputed_knn is not None:
+            # CUDA GPU path: use cuML for GPU-accelerated layout/SGD optimisation.
+            # cuML requires self-loops (self as first neighbour), which we prepend here.
+            try:
+                from cuml.manifold import UMAP as cumlUMAP
+                cuml_indices, cuml_dists = _add_self_loops(*precomputed_knn)
+                print("  KNN computed on CPU. Running UMAP layout optimisation on CUDA GPU (cuML)...")
+                embedding_model = cumlUMAP(
+                    n_neighbors=n_neighbors,
+                    min_dist=min_dist,
+                    n_components=2,
+                    random_state=random_state,
+                    precomputed_knn=(cuml_indices, cuml_dists),
+                ).fit(reduced_input_data)
+            except ImportError:
+                print(
+                    "  cuML not found — falling back to CPU (umap-learn). "
+                    "For GPU-accelerated UMAP layout on CUDA, install cuML >= 23.02 matching "
+                    "your CUDA version: conda: 'conda install -c rapidsai cuml', "
+                    "or pip: 'pip install cuml-cu12>=23.02 --extra-index-url=https://pypi.nvidia.com'"
+                )
+                embedding_model = umap.UMAP(
+                    n_neighbors=n_neighbors,
+                    metric=metric,
+                    min_dist=min_dist,
+                    n_components=2,
+                    random_state=random_state,
+                    precomputed_knn=precomputed_knn,
+                    **kwargs,
+                ).fit(reduced_input_data)
+        else:
+            # CPU / MLX path: umap-learn with precomputed KNN (or standard if small dataset)
+            if precomputed_knn is not None:
+                if USING_MLX:
+                    print(
+                        "  KNN computed on CPU. Note: GPU-accelerated UMAP layout optimisation "
+                        "is not available for Apple Silicon. Running on CPU (umap-learn). "
+                        "GPU layout optimisation is available if a CUDA GPU is present."
+                    )
+                else:
+                    print("  KNN computed on CPU. Running UMAP layout optimisation on CPU (umap-learn)...")
+            embedding_model = umap.UMAP(
+                n_neighbors=n_neighbors,
+                metric=metric,
+                min_dist=min_dist,
+                n_components=2,
+                random_state=random_state,
+                precomputed_knn=precomputed_knn,
+                **kwargs,
+            ).fit(reduced_input_data)
         gene_cluster_embeddings.append(embedding_model.embedding_)
     # Store display labels in adata for use by plot function
     adata.uns['gene_cluster_labels'] = display_labels
