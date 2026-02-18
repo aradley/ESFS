@@ -251,11 +251,9 @@ def parallel_calc_es_matrices(
     ## Extract sample and feature cardinality
     sample_cardinality = global_scaled_matrix.shape[0]
     ## Calculate feature sums and minority states for each adata feature
-    # NOTE: .A is needed here for scipy, but incompatible with cupy.
     global feature_sums
     if not USING_GPU:
-        feature_sums = global_scaled_matrix.sum(axis=0).A.flatten()
-        feature_sums = np.asarray(feature_sums).flatten()  # Ensure NumPy array
+        feature_sums = np.asarray(global_scaled_matrix.sum(axis=0)).flatten()
     else:
         feature_sums = global_scaled_matrix.sum(axis=0).flatten()
     global minority_states
@@ -541,7 +539,7 @@ def calc_es_metrics_vec(
         if USING_GPU:
             fixed_features_cardinality = fixed_features.sum(axis=0).flatten()
         else:
-            fixed_features_cardinality = np.asarray(fixed_features.sum(axis=0).A.flatten())
+            fixed_features_cardinality = np.asarray(fixed_features.sum(axis=0)).flatten()
     else:
         fixed_features_cardinality = fixed_features.toarray().sum(axis=0)
     fixed_feature_minority_states = fixed_features_cardinality.copy()
@@ -2098,7 +2096,7 @@ def parallel_identify_max_ESSs(secondary_features, sorted_SGs_idxs, use_cores=-1
         for i in range(batch_start, batch_end):
             cols = top_score_columns_combinations[i]
             if len(cols) > 0:
-                gene_sum = secondary_features[:, cols].sum(axis=1).A.flatten()
+                gene_sum = np.asarray(secondary_features[:, cols].sum(axis=1)).flatten()
                 nonzero_rows = np.nonzero(gene_sum)[0]
                 row_indices.extend(nonzero_rows)
                 col_indices.extend([i - batch_start] * len(nonzero_rows))  # Local column index
@@ -2156,8 +2154,7 @@ def identify_max_ESSs_get_overlap_info(
             sub_secondary_features.indptr,
         )
     )
-    # scipy sparse returns matrix, need .A
-    overlaps = sub_secondary_features.minimum(B).sum(axis=0).A[0]
+    overlaps = np.asarray(sub_secondary_features.minimum(B).sum(axis=0)).ravel()
     #
     inverse_fixed_feature = np.max(fixed_feature) - fixed_feature
     nonzero_inds = np.where(inverse_fixed_feature != 0)[0]
@@ -2169,8 +2166,7 @@ def identify_max_ESSs_get_overlap_info(
             sub_secondary_features.indptr,
         )
     )
-    # scipy sparse returns matrix, need .A
-    inverse_overlaps = sub_secondary_features.minimum(B).sum(axis=0).A[0]
+    inverse_overlaps = np.asarray(sub_secondary_features.minimum(B).sum(axis=0)).ravel()
     ## If FF is observed in it's minority state, use the following 4 steps to caclulate overlaps with every other feature
     if fixed_feature_cardinality < (sample_cardinality / 2):
         #######
@@ -2279,8 +2275,7 @@ def identify_max_ESSs_vec(FF_inds, secondary_features, sorted_SGs_idxs, chunksiz
     fixed_features = global_scaled_matrix[:, FF_inds]
     # Calculate fixed feature statistics
     if spsparse.issparse(fixed_features):
-        # scipy sparse returns matrix, need .A
-        fixed_features_cardinality = fixed_features.sum(axis=0).A.flatten()
+        fixed_features_cardinality = np.asarray(fixed_features.sum(axis=0)).flatten()
     else:
         fixed_features_cardinality = fixed_features.sum(axis=0)
     fixed_feature_minority_states = fixed_features_cardinality.copy()
