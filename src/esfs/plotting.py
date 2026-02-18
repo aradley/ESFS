@@ -595,6 +595,21 @@ def get_gene_cluster_cell_UMAPs(
     gene_cluster_embeddings = []
     # Store display labels for plot function
     display_labels = []
+    # Try cuML import once before the loop so the "not found" message appears at most once.
+    cumlUMAP = None
+    if USING_GPU:
+        try:
+            from cuml.manifold import UMAP as cumlUMAP
+        except ImportError:
+            print(
+                "  cuML not found — falling back to CPU (umap-learn). "
+                "For GPU-accelerated UMAP layout on CUDA, install cuML:\n"
+                "    pip (recommended): pip install \"cuml-cu12>=23.02\" "
+                "--extra-index-url=https://pypi.nvidia.com\n"
+                "    conda (alternative — first run 'pip uninstall cupy-cuda12x'): "
+                "conda install -c rapidsai -c conda-forge -c nvidia cuml "
+                "cuda-version=$(nvidia-smi | grep -oP 'CUDA Version: \\K[\\d.]+')"
+            )
 
     for lbl in unique_gene_clust_labels:
         if isinstance(lbl, (list, np.ndarray)):
@@ -639,36 +654,18 @@ def get_gene_cluster_cell_UMAPs(
             )
             precomputed_knn = (knn_indices, knn_dists)
         #
-        if USING_GPU and precomputed_knn is not None:
+        if cumlUMAP is not None and precomputed_knn is not None:
             # CUDA GPU path: use cuML for GPU-accelerated layout/SGD optimisation.
             # cuML requires self-loops (self as first neighbour), which we prepend here.
-            try:
-                from cuml.manifold import UMAP as cumlUMAP
-                cuml_indices, cuml_dists = _add_self_loops(*precomputed_knn)
-                print("  KNN computed on CPU. Running UMAP layout optimisation on CUDA GPU (cuML)...")
-                embedding_model = cumlUMAP(
-                    n_neighbors=n_neighbors,
-                    min_dist=min_dist,
-                    n_components=2,
-                    random_state=random_state,
-                    precomputed_knn=(cuml_indices, cuml_dists),
-                ).fit(reduced_input_data)
-            except ImportError:
-                print(
-                    "  cuML not found — falling back to CPU (umap-learn). "
-                    "For GPU-accelerated UMAP layout on CUDA, install cuML >= 23.02 matching "
-                    "your CUDA version: conda: 'conda install -c rapidsai cuml', "
-                    "or pip: 'pip install cuml-cu12>=23.02 --extra-index-url=https://pypi.nvidia.com'"
-                )
-                embedding_model = umap.UMAP(
-                    n_neighbors=n_neighbors,
-                    metric=metric,
-                    min_dist=min_dist,
-                    n_components=2,
-                    random_state=random_state,
-                    precomputed_knn=precomputed_knn,
-                    **kwargs,
-                ).fit(reduced_input_data)
+            cuml_indices, cuml_dists = _add_self_loops(*precomputed_knn)
+            print("  KNN computed on CPU. Running UMAP layout optimisation on CUDA GPU (cuML)...")
+            embedding_model = cumlUMAP(
+                n_neighbors=n_neighbors,
+                min_dist=min_dist,
+                n_components=2,
+                random_state=random_state,
+                precomputed_knn=(cuml_indices, cuml_dists),
+            ).fit(reduced_input_data)
         else:
             # CPU / MLX path: umap-learn with precomputed KNN (or standard if small dataset)
             if precomputed_knn is not None:

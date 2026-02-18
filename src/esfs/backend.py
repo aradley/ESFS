@@ -42,6 +42,15 @@ def _try_load_cupy():
             return np, spsparse, False
     except ImportError:
         return np, spsparse, False
+    except Exception as e:
+        warnings.warn(
+            f"CuPy failed to import ({type(e).__name__}: {e}). "
+            "This may be caused by conflicting CuPy installations (e.g. 'cupy-cuda12x' via pip "
+            "and 'cupy' via conda). To fix: run 'conda uninstall cuml cupy' then "
+            "'pip install \"cuml-cu12>=23.02\" --extra-index-url=https://pypi.nvidia.com'. "
+            "Falling back to CPU."
+        )
+        return np, spsparse, False
 
 
 def use_gpu():
