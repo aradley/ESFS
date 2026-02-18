@@ -64,6 +64,100 @@ def _normalize_rows(X):
     return X_norm
 
 
+def _precompute_knn_correlation(X_dense, n_neighbors, memory_limit_gb=5.0):
+    """Precompute k-nearest neighbors using correlation distance via chunked matmul.
+
+    After row-normalization (center + unit-normalize), correlation distance
+    equals ``1 - dot_product``.  This matches UMAP / pynndescent's correlation
+    formula exactly.  KNN is found via BLAS-optimized matrix multiplication,
+    which is significantly faster than pynndescent for large datasets.
+
+    Parameters
+    ----------
+    X_dense : np.ndarray, shape (n_cells, n_genes)
+        Dense expression matrix.
+    n_neighbors : int
+        Number of nearest neighbors to find (excluding self).
+    memory_limit_gb : float, default 5.0
+        Maximum memory (GB) for the per-chunk correlation matrix.
+
+    Returns
+    -------
+    knn_indices : np.ndarray, shape (n_cells, n_neighbors), dtype int64
+    knn_dists   : np.ndarray, shape (n_cells, n_neighbors), dtype float64
+        Correlation distances sorted ascending per row.
+    """
+    n_cells, _ = X_dense.shape
+
+    # Step 1 — normalise rows so corr_dist(a, b) = 1 - a · b
+    X_norm = _normalize_rows(np.ascontiguousarray(X_dense, dtype=np.float64))
+
+    # Step 2 — detect zero-variance rows (set to zero by _normalize_rows)
+    # Unit-normalised rows have squared norm ≈ 1.0; zero-variance rows = 0.0
+    row_norms_sq = np.einsum("ij,ij->i", X_norm, X_norm)
+    zero_var_mask = row_norms_sq < 0.5
+    has_zero_var = np.any(zero_var_mask)
+
+    # Step 3 — auto-size chunks based on memory budget
+    # Memory per chunk = chunksize × n_cells × 8 bytes (float64)
+    chunksize = min(n_cells, max(100, int(memory_limit_gb * 1e9) // (n_cells * 8)))
+
+    # Step 4 — allocate output arrays
+    knn_indices = np.empty((n_cells, n_neighbors), dtype=np.int64)
+    knn_dists = np.empty((n_cells, n_neighbors), dtype=np.float64)
+
+    with tqdm(total=n_cells, desc="Precomputing KNN (correlation)", unit="cells") as pbar:
+        for chunk_start in range(0, n_cells, chunksize):
+            chunk_end = min(chunk_start + chunksize, n_cells)
+            chunk_len = chunk_end - chunk_start
+
+            # Correlations via BLAS dgemm (multi-threaded)
+            chunk_correlations = X_norm[chunk_start:chunk_end] @ X_norm.T
+
+            # Convert to distances, clamp to [0, 2]
+            chunk_distances = 1.0 - chunk_correlations
+            del chunk_correlations
+            np.clip(chunk_distances, 0.0, 2.0, out=chunk_distances)
+
+            # Zero-variance edge case: UMAP returns 0.0 when both vectors
+            # have zero variance.  After normalisation both are zero-vectors
+            # so dot = 0 → distance = 1.0.  Correct to 0.0 here.
+            if has_zero_var:
+                chunk_zv = zero_var_mask[chunk_start:chunk_end]
+                if np.any(chunk_zv):
+                    chunk_distances[np.ix_(chunk_zv, zero_var_mask)] = 0.0
+
+            # Exclude self-distances
+            diag_rows = np.arange(chunk_len)
+            chunk_distances[diag_rows, diag_rows + chunk_start] = np.inf
+
+            # Find k-nearest via argpartition (O(n) average per row)
+            partitioned_idx = np.argpartition(
+                chunk_distances, kth=n_neighbors, axis=1
+            )[:, :n_neighbors]
+
+            # Gather actual distances
+            row_idx = np.arange(chunk_len)[:, np.newaxis]
+            partitioned_dists = chunk_distances[row_idx, partitioned_idx]
+            del chunk_distances
+
+            # Sort ascending within each row (UMAP needs sorted KNN for
+            # sigma / rho computation in fuzzy_simplicial_set)
+            sort_order = np.argsort(partitioned_dists, axis=1)
+            knn_indices[chunk_start:chunk_end] = np.take_along_axis(
+                partitioned_idx, sort_order, axis=1
+            )
+            knn_dists[chunk_start:chunk_end] = np.take_along_axis(
+                partitioned_dists, sort_order, axis=1
+            )
+            del partitioned_idx, partitioned_dists, sort_order
+
+            pbar.update(chunk_len)
+
+    del X_norm
+    return knn_indices, knn_dists
+
+
 @numba.njit(fastmath=True)
 def _smooth_expression_chunk(full_X, neighbors, start_idx, end_idx):
     """Smooth a chunk of cells by averaging over k neighbors.
@@ -515,6 +609,19 @@ def get_gene_cluster_cell_UMAPs(
             reduced_input_data = np.asarray(X)
         if log_transformed:
             reduced_input_data = np.log2(reduced_input_data + 1)
+        # Precompute KNN for correlation metric on large datasets.
+        # Chunked BLAS matmul is faster than pynndescent's approximate search.
+        # Threshold of 4096 matches UMAP's internal cutoff for brute-force vs
+        # approximate neighbour search.
+        precomputed_knn = None
+        n_cells = reduced_input_data.shape[0]
+        if metric == "correlation" and n_cells >= 4096:
+            effective_n_neighbors = min(n_neighbors, n_cells - 1)
+            print(f"  Precomputing KNN ({n_cells} cells)...")
+            knn_indices, knn_dists = _precompute_knn_correlation(
+                reduced_input_data, effective_n_neighbors
+            )
+            precomputed_knn = (knn_indices, knn_dists)
         #
         embedding_model = umap.UMAP(
             n_neighbors=n_neighbors,
@@ -522,10 +629,10 @@ def get_gene_cluster_cell_UMAPs(
             min_dist=min_dist,
             n_components=2,
             random_state=random_state,  # UMAP uses None as default
+            precomputed_knn=precomputed_knn,
             **kwargs,
         ).fit(reduced_input_data)
         gene_cluster_embeddings.append(embedding_model.embedding_)
-        #
     # Store display labels in adata for use by plot function
     adata.uns['gene_cluster_labels'] = display_labels
     return gene_cluster_embeddings, gene_cluster_selected_genes
