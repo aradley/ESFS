@@ -92,7 +92,12 @@ def _precompute_knn_correlation(X_dense, n_neighbors, memory_limit_gb=5.0):
     n_cells, _ = X_dense.shape
 
     # Step 1 — normalise rows so corr_dist(a, b) = 1 - a · b
-    X_norm = _normalize_rows(np.ascontiguousarray(X_dense, dtype=np.float64))
+    # Normalise in float64 for precision, then cast to float32 to halve the matmul memory
+    # and double BLAS SIMD throughput.  Float32 rounding error (~5.8e-8 relative) has no
+    # effect on k-NN identity at k=50.
+    X_norm_f64 = _normalize_rows(np.ascontiguousarray(X_dense, dtype=np.float64))
+    X_norm = X_norm_f64.astype(np.float32)
+    del X_norm_f64
 
     # Step 2 — detect zero-variance rows (set to zero by _normalize_rows)
     # Unit-normalised rows have squared norm ≈ 1.0; zero-variance rows = 0.0
@@ -101,8 +106,8 @@ def _precompute_knn_correlation(X_dense, n_neighbors, memory_limit_gb=5.0):
     has_zero_var = np.any(zero_var_mask)
 
     # Step 3 — auto-size chunks based on memory budget
-    # Memory per chunk = chunksize × n_cells × 8 bytes (float64)
-    chunksize = min(n_cells, max(100, int(memory_limit_gb * 1e9) // (n_cells * 8)))
+    # Memory per chunk = chunksize × n_cells × 4 bytes (float32)
+    chunksize = min(n_cells, max(100, int(memory_limit_gb * 1e9) // (n_cells * 4)))
 
     # Step 4 — allocate output arrays
     knn_indices = np.empty((n_cells, n_neighbors), dtype=np.int64)
@@ -116,10 +121,11 @@ def _precompute_knn_correlation(X_dense, n_neighbors, memory_limit_gb=5.0):
             # Correlations via BLAS dgemm (multi-threaded)
             chunk_correlations = X_norm[chunk_start:chunk_end] @ X_norm.T
 
-            # Convert to distances, clamp to [0, 2]
-            chunk_distances = 1.0 - chunk_correlations
-            del chunk_correlations
-            np.clip(chunk_distances, 0.0, 2.0, out=chunk_distances)
+            # Convert to distances in-place (avoids allocating a second chunk-sized array)
+            # and clamp to [0, 2].  Peak memory = exactly one chunk matrix = memory_limit_gb.
+            np.subtract(1.0, chunk_correlations, out=chunk_correlations)
+            np.clip(chunk_correlations, 0.0, 2.0, out=chunk_correlations)
+            chunk_distances = chunk_correlations  # same buffer, renamed for clarity
 
             # Zero-variance edge case: UMAP returns 0.0 when both vectors
             # have zero variance.  After normalisation both are zero-vectors
@@ -580,10 +586,12 @@ def get_gene_cluster_cell_UMAPs(
     specific_cluster: Optional[Union[int, List[int]]] = None,
     metric: str = "correlation",
     random_state: Optional[int] = None,
+    memory_limit_gb: float = 5.0,
     **kwargs,
 ):
     print(
-        "Generating the cell UMAP embeddings for each cluster of genes from the previous function."
+        "Generating the cell UMAP embeddings for each cluster of genes from the previous function.",
+        flush=True,
     )
     if specific_cluster is None:
         unique_gene_clust_labels = list(np.unique(gene_clust_labels))
@@ -614,12 +622,12 @@ def get_gene_cluster_cell_UMAPs(
         if isinstance(lbl, (list, np.ndarray)):
             # Multiple clusters combined - use np.isin
             display_label = ", ".join(str(x) for x in lbl)
-            print(f"Plotting cell UMAP using gene clusters {display_label}")
+            print(f"Plotting cell UMAP using gene clusters {display_label}", flush=True)
             mask = np.isin(gene_clust_labels, lbl)
             selected_genes = top_ESS_genes[mask].tolist()
         else:
             display_label = str(lbl)
-            print(f"Plotting cell UMAP using gene cluster {lbl}")
+            print(f"Plotting cell UMAP using gene cluster {lbl}", flush=True)
             selected_genes = top_ESS_genes[gene_clust_labels == lbl].tolist()
         display_labels.append(display_label)
         if len(selected_genes) == 0:
@@ -647,9 +655,9 @@ def get_gene_cluster_cell_UMAPs(
         n_cells = reduced_input_data.shape[0]
         if metric == "correlation" and n_cells >= 4096:
             effective_n_neighbors = min(n_neighbors, n_cells - 1)
-            print(f"  Precomputing KNN ({n_cells} cells)...")
+            print(f"  Precomputing KNN ({n_cells:,} cells)...", flush=True)
             knn_indices, knn_dists = _precompute_knn_correlation(
-                reduced_input_data, effective_n_neighbors
+                reduced_input_data, effective_n_neighbors, memory_limit_gb=memory_limit_gb
             )
             precomputed_knn = (knn_indices, knn_dists)
         #
