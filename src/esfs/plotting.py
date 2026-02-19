@@ -92,12 +92,7 @@ def _precompute_knn_correlation(X_dense, n_neighbors, memory_limit_gb=5.0):
     n_cells, _ = X_dense.shape
 
     # Step 1 — normalise rows so corr_dist(a, b) = 1 - a · b
-    # Normalise in float64 for precision, then cast to float32 to halve the matmul memory
-    # and double BLAS SIMD throughput.  Float32 rounding error (~5.8e-8 relative) has no
-    # effect on k-NN identity at k=50.
-    X_norm_f64 = _normalize_rows(np.ascontiguousarray(X_dense, dtype=np.float64))
-    X_norm = X_norm_f64.astype(np.float32)
-    del X_norm_f64
+    X_norm = _normalize_rows(np.ascontiguousarray(X_dense, dtype=np.float64))
 
     # Step 2 — detect zero-variance rows (set to zero by _normalize_rows)
     # Unit-normalised rows have squared norm ≈ 1.0; zero-variance rows = 0.0
@@ -106,8 +101,8 @@ def _precompute_knn_correlation(X_dense, n_neighbors, memory_limit_gb=5.0):
     has_zero_var = np.any(zero_var_mask)
 
     # Step 3 — auto-size chunks based on memory budget
-    # Memory per chunk = chunksize × n_cells × 4 bytes (float32)
-    chunksize = min(n_cells, max(100, int(memory_limit_gb * 1e9) // (n_cells * 4)))
+    # Memory per chunk = chunksize × n_cells × 8 bytes (float64)
+    chunksize = min(n_cells, max(100, int(memory_limit_gb * 1e9) // (n_cells * 8)))
 
     # Step 4 — allocate output arrays
     knn_indices = np.empty((n_cells, n_neighbors), dtype=np.int64)
