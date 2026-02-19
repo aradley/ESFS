@@ -1,4 +1,5 @@
 from typing import List, Optional, Union
+import os
 import warnings
 
 from joblib import Parallel, delayed
@@ -590,9 +591,6 @@ def get_gene_cluster_cell_UMAPs(
     )
     if specific_cluster is None:
         unique_gene_clust_labels = list(np.unique(gene_clust_labels))
-    elif isinstance(specific_cluster, (list, np.ndarray)):
-        # Combine multiple clusters into one UMAP
-        unique_gene_clust_labels = [specific_cluster]
     else:
         unique_gene_clust_labels = [specific_cluster]
     # Create containers for the selected genes and embeddings
@@ -602,10 +600,14 @@ def get_gene_cluster_cell_UMAPs(
     display_labels = []
     # Try cuML import once before the loop so the "not found" message appears at most once.
     cumlUMAP = None
+    cumlNN = None
     if USING_GPU:
         try:
             from cuml.manifold import UMAP as cumlUMAP
+            from cuml.neighbors import NearestNeighbors as cumlNN
         except ImportError:
+            cumlUMAP = None
+            cumlNN = None
             print(
                 "  cuML not found — falling back to CPU (umap-learn). "
                 "For GPU-accelerated UMAP layout on CUDA, install cuML then restart Python:\n"
@@ -614,16 +616,11 @@ def get_gene_cluster_cell_UMAPs(
             )
 
     for lbl in unique_gene_clust_labels:
-        if isinstance(lbl, (list, np.ndarray)):
-            # Multiple clusters combined - use np.isin
-            display_label = ", ".join(str(x) for x in lbl)
-            print(f"Plotting cell UMAP using gene clusters {display_label}", flush=True)
-            mask = np.isin(gene_clust_labels, lbl)
-            selected_genes = top_ESS_genes[mask].tolist()
-        else:
-            display_label = str(lbl)
-            print(f"Plotting cell UMAP using gene cluster {lbl}", flush=True)
-            selected_genes = top_ESS_genes[gene_clust_labels == lbl].tolist()
+        lbl_list = lbl if isinstance(lbl, (list, np.ndarray)) else [lbl]
+        display_label = ", ".join(str(x) for x in lbl_list)
+        plural = "s" if len(lbl_list) > 1 else ""
+        print(f"Plotting cell UMAP using gene cluster{plural} {display_label}", flush=True)
+        selected_genes = top_ESS_genes[np.isin(gene_clust_labels, lbl_list)].tolist()
         display_labels.append(display_label)
         if len(selected_genes) == 0:
             print(f"No genes found in cluster {lbl}, skipping this cluster.")
@@ -632,55 +629,77 @@ def get_gene_cluster_cell_UMAPs(
             gene_cluster_selected_genes.append([])
             continue
         gene_cluster_selected_genes.append(selected_genes)
-        # xp.save(path + "Saved_ESFS_Genes.npy",xp.asarray(selected_genes))
         X = adata[:, selected_genes].X
-        if spsparse.issparse(X):
-            reduced_input_data = X.toarray()
-        elif hasattr(X, 'toarray'):
-            reduced_input_data = np.asarray(X.toarray())
-        else:
-            reduced_input_data = np.asarray(X)
+        reduced_input_data = np.asarray(X.toarray() if hasattr(X, 'toarray') else X)
         if log_transformed:
             reduced_input_data = np.log2(reduced_input_data + 1)
-        # Precompute KNN for correlation metric on large datasets.
-        # Chunked BLAS matmul is faster than pynndescent's approximate search.
-        # Threshold of 4096 matches UMAP's internal cutoff for brute-force vs
-        # approximate neighbour search.
-        precomputed_knn = None
         n_cells = reduced_input_data.shape[0]
-        if metric == "correlation" and n_cells >= 4096:
-            effective_n_neighbors = min(n_neighbors, n_cells - 1)
-            print(f"  Precomputing KNN ({n_cells:,} cells)...", flush=True)
-            knn_indices, knn_dists = _precompute_knn_correlation(
-                reduced_input_data, effective_n_neighbors, memory_limit_gb=memory_limit_gb
-            )
-            precomputed_knn = (knn_indices, knn_dists)
-        #
-        if cumlUMAP is not None and precomputed_knn is not None:
-            # CUDA GPU path: use cuML for GPU-accelerated layout/SGD optimisation.
-            # cuML requires self-loops (self as first neighbour), which we prepend here.
-            cuml_indices, cuml_dists = _add_self_loops(*precomputed_knn)
-            print("  KNN computed on CPU. Running UMAP layout optimisation on CUDA GPU (cuML)...")
+        effective_n_neighbors = min(n_neighbors, n_cells - 1)
+
+        if cumlUMAP is not None and cumlNN is not None:
+            # === Full GPU path ===
+            # Row-normalise on CPU (Numba, O(N×G), fast).
+            # After normalisation: d_euclid² = 2 × d_corr (same KNN neighbours).
+            print("  Normalising rows for GPU KNN...", flush=True)
+            X_norm = _normalize_rows(
+                np.ascontiguousarray(reduced_input_data, dtype=np.float64)
+            ).astype(np.float32)  # cuML requires float32
+
+            # GPU euclidean KNN. Request k+1 because cuML returns self as the
+            # first neighbour (distance = 0) when querying on the training data.
+            print(f"  Computing KNN ({n_cells:,} cells) on CUDA GPU...", flush=True)
+            nn = cumlNN(n_neighbors=effective_n_neighbors + 1, metric="euclidean")
+            nn.fit(X_norm)
+            gpu_dists_euclid, gpu_indices = nn.kneighbors(X_norm)
+            del nn  # free GPU index memory — no longer needed
+            # Drop self (column 0, distance = 0) to get the k actual neighbours
+            knn_indices_gpu = gpu_indices[:, 1:]
+            knn_dists_euclid = gpu_dists_euclid[:, 1:]
+            del gpu_indices, gpu_dists_euclid
+
+            # Convert Euclidean → correlation distances: d_corr = d_euclid² / 2
+            knn_dists_corr = knn_dists_euclid ** 2 / 2
+            del knn_dists_euclid
+
+            # Transfer GPU arrays to CPU — np.concatenate in _add_self_loops requires numpy
+            knn_indices_gpu = np.asarray(knn_indices_gpu)
+            knn_dists_corr = np.asarray(knn_dists_corr)
+
+            # Prepend self-loops (required by cuML UMAP precomputed_knn format)
+            cuml_indices, cuml_dists = _add_self_loops(knn_indices_gpu, knn_dists_corr)
+            del knn_indices_gpu, knn_dists_corr
+
+            print("  Running UMAP layout optimisation on CUDA GPU (cuML)...", flush=True)
             embedding_model = cumlUMAP(
-                n_neighbors=n_neighbors,
+                n_neighbors=effective_n_neighbors,
                 min_dist=min_dist,
                 n_components=2,
                 random_state=random_state,
                 precomputed_knn=(cuml_indices, cuml_dists),
-            ).fit(reduced_input_data)
+            ).fit(X_norm)
+            gene_cluster_embeddings.append(np.asarray(embedding_model.embedding_))
+
         else:
-            # CPU / MLX path: umap-learn with precomputed KNN (or standard if small dataset)
-            if precomputed_knn is not None:
-                if USING_MLX:
-                    print(
-                        "  KNN computed on CPU. Note: GPU-accelerated UMAP layout optimisation "
-                        "is not available for Apple Silicon. Running on CPU (umap-learn). "
-                        "GPU layout optimisation is available if a CUDA GPU is present."
-                    )
-                else:
-                    print("  KNN computed on CPU. Running UMAP layout optimisation on CPU (umap-learn)...")
+            # === CPU path ===
+            # Exact correlation KNN via chunked BLAS matmul, then umap-learn.
+            precomputed_knn = None
+            if metric == "correlation":
+                _n_cpu = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+                print(f"  Precomputing KNN ({n_cells:,} cells) on CPU ({_n_cpu} cores available)...", flush=True)
+                knn_indices, knn_dists = _precompute_knn_correlation(
+                    reduced_input_data, effective_n_neighbors, memory_limit_gb=memory_limit_gb
+                )
+                precomputed_knn = (knn_indices, knn_dists)
+            if precomputed_knn is not None and USING_MLX:
+                print(
+                    "  Note: GPU-accelerated KNN and UMAP are not available for Apple Silicon. "
+                    "Running on CPU (umap-learn). "
+                    "GPU acceleration is available if a CUDA GPU and cuML are present.",
+                    flush=True,
+                )
+            print("  Running UMAP layout optimisation on CPU (umap-learn)...", flush=True)
             embedding_model = umap.UMAP(
-                n_neighbors=n_neighbors,
+                n_neighbors=effective_n_neighbors,
                 metric=metric,
                 min_dist=min_dist,
                 n_components=2,
@@ -688,7 +707,7 @@ def get_gene_cluster_cell_UMAPs(
                 precomputed_knn=precomputed_knn,
                 **kwargs,
             ).fit(reduced_input_data)
-        gene_cluster_embeddings.append(embedding_model.embedding_)
+            gene_cluster_embeddings.append(embedding_model.embedding_)
     # Store display labels in adata for use by plot function
     adata.uns['gene_cluster_labels'] = display_labels
     return gene_cluster_embeddings, gene_cluster_selected_genes
