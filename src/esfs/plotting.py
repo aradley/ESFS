@@ -214,10 +214,13 @@ def knn_smooth_gene_expression(
     metric: str = "correlation",
     log_scale: bool = False,
     chunksize: Optional[int] = None,
+    force_recalculate: bool = False,
 ):
     """Smooth gene expression by averaging over k nearest neighbors.
 
     Uses Numba-accelerated correlation distance computation and parallel processing.
+    The KNN correlation distance matrix is saved to adata.obsp['correlation_distance_kNN']
+    and reused on subsequent calls unless force_recalculate=True.
 
     Parameters:
         adata: AnnData object with expression data
@@ -226,6 +229,7 @@ def knn_smooth_gene_expression(
         metric: Distance metric, currently only "correlation" is supported
         log_scale: If True, log2-transform expression before computing distances
         chunksize: Chunk size for progress updates (default: 5% of cells)
+        force_recalculate: If True, recompute KNN even if stored matrix exists (default: False)
 
     Returns:
         adata with smoothed expression in adata.layers["Smoothed_Expression"]
@@ -284,69 +288,132 @@ def knn_smooth_gene_expression(
     # Free X_subset memory before loading full_X
     del X_subset
 
-    # Try cuML for GPU-accelerated KNN
-    cumlNN = None
-    if USING_GPU:
-        try:
-            from cuml.neighbors import NearestNeighbors as cumlNN
-        except ImportError:
-            cumlNN = None
-            print(
-                "  cuML not found — falling back to CPU. "
-                "For GPU-accelerated KNN on CUDA, install cuML then restart Python:\n"
-                '    pip install "cuml-cu12>=23.02" --extra-index-url=https://pypi.nvidia.com\n'
-                "  Note: cuML currently requires Python <=3.11; "
-                "it may not be available for Python 3.12+."
-            )
+    # Check for stored KNN distance matrix
+    loaded_knn = False
+    if not force_recalculate and 'correlation_distance_kNN' in adata.obsp:
+        stored_csr = adata.obsp['correlation_distance_kNN'].tocsr()
+        if stored_csr.shape[0] != n_cells:
+            print(f"  Stored KNN matrix has {stored_csr.shape[0]} cells but adata "
+                  f"has {n_cells}. Recomputing...", flush=True)
+        else:
+            nnz_per_row = np.diff(stored_csr.indptr)
+            stored_k = int(nnz_per_row.min())
+            if stored_k >= knn - 1:
+                print(f"  Using existing KNN from adata.obsp['correlation_distance_kNN'] "
+                      f"(stored k={stored_k}, using k={knn - 1})", flush=True)
+                if stored_k == knn - 1:
+                    actual_neighbors = stored_csr.indices.reshape(n_cells, stored_k).copy()
+                else:
+                    all_indices = stored_csr.indices.reshape(n_cells, stored_k)
+                    all_dists = stored_csr.data.reshape(n_cells, stored_k)
+                    subset_idx = np.argpartition(all_dists, kth=knn - 1, axis=1)[:, :knn - 1]
+                    actual_neighbors = np.take_along_axis(all_indices, subset_idx, axis=1)
+                # Prepend self for smoothing
+                self_col = np.arange(n_cells).reshape(-1, 1)
+                neighbors = np.concatenate(
+                    [self_col, actual_neighbors.astype(np.int64)], axis=1
+                )
+                loaded_knn = True
+                del X_norm, stored_csr
+            else:
+                print(f"  Stored KNN has fewer neighbors ({stored_k}) than needed "
+                      f"({knn - 1}). Recomputing...", flush=True)
+                del stored_csr
 
-    # Step 2: Find KNN
-    if cumlNN is not None:
-        # === GPU KNN path (cuML NN-descent, O(N log N)) ===
-        # Row-normalised above; d_euclid² = 2 × d_corr → same KNN neighbours.
-        X_norm_f32 = X_norm.astype(np.float32)  # cuML requires float32
-        del X_norm
+    # Step 2: Find KNN (skip if loaded from stored matrix)
+    if not loaded_knn:
+        # Try cuML for GPU-accelerated KNN
+        cumlNN = None
+        if USING_GPU:
+            try:
+                from cuml.neighbors import NearestNeighbors as cumlNN
+            except ImportError:
+                cumlNN = None
+                print(
+                    "  cuML not found — falling back to CPU. "
+                    "For GPU-accelerated KNN on CUDA, install cuML then restart Python:\n"
+                    '    pip install "cuml-cu12>=23.02" --extra-index-url=https://pypi.nvidia.com\n'
+                    "  Note: cuML currently requires Python <=3.11; "
+                    "it may not be available for Python 3.12+."
+                )
 
-        print(f"  Computing KNN ({n_cells:,} cells) on CUDA GPU...", flush=True)
-        nn = cumlNN(n_neighbors=knn, metric="euclidean")
-        nn.fit(X_norm_f32)
-        gpu_dists_euclid, gpu_indices = nn.kneighbors(X_norm_f32)
-        del nn, X_norm_f32  # free GPU memory
+        if cumlNN is not None:
+            # === GPU KNN path (cuML NN-descent, O(N log N)) ===
+            # Row-normalised above; d_euclid² = 2 × d_corr → same KNN neighbours.
+            X_norm_f32 = X_norm.astype(np.float32)  # cuML requires float32
+            del X_norm
 
-        # Convert Euclidean → correlation distances: d_corr = d_euclid² / 2
-        # (not used for smoothing, but documents equivalence with CPU path)
-        gpu_dists_corr = np.asarray(gpu_dists_euclid) ** 2 / 2
-        del gpu_dists_euclid, gpu_dists_corr
+            print(f"  Computing KNN ({n_cells:,} cells) on CUDA GPU...", flush=True)
+            nn = cumlNN(n_neighbors=knn, metric="euclidean")  # returns knn including self
+            nn.fit(X_norm_f32)
+            gpu_dists_euclid, gpu_indices = nn.kneighbors(X_norm_f32)
+            del nn, X_norm_f32  # free GPU memory
 
-        neighbors = np.asarray(gpu_indices).astype(np.int64)
-        del gpu_indices
+            # Drop self (index 0, distance 0) → knn-1 actual neighbors
+            gpu_dists_euclid = gpu_dists_euclid[:, 1:]
+            gpu_indices = gpu_indices[:, 1:]
 
-    else:
-        # === CPU KNN path (chunked BLAS matmul, O(N²)) ===
-        _n_cpu = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
-        print(f"  Computing KNN ({n_cells:,} cells) on CPU ({_n_cpu} cores available)...", flush=True)
+            # Convert Euclidean → correlation distances: d_corr = d_euclid² / 2
+            actual_dists = np.asarray(gpu_dists_euclid) ** 2 / 2
+            del gpu_dists_euclid
 
-        neighbors = np.empty((n_cells, knn), dtype=np.int64)
+            actual_neighbors = np.asarray(gpu_indices).astype(np.int64)
+            del gpu_indices
 
-        with tqdm(total=n_cells, desc="Finding neighbors", unit="cells") as pbar:
-            for chunk_start in range(0, n_cells, knn_chunksize):
-                chunk_end = min(chunk_start + knn_chunksize, n_cells)
+        else:
+            # === CPU KNN path (chunked BLAS matmul, O(N²)) ===
+            _n_cpu = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+            print(f"  Computing KNN ({n_cells:,} cells) on CPU ({_n_cpu} cores available)...", flush=True)
 
-                # Compute correlations from chunk to ALL cells
-                # Shape: (chunk_size, n_cells) - manageable memory
-                chunk_correlations = X_norm[chunk_start:chunk_end] @ X_norm.T
+            actual_neighbors = np.empty((n_cells, knn - 1), dtype=np.int64)
+            actual_dists = np.empty((n_cells, knn - 1), dtype=np.float64)
 
-                # Convert to distances and find k-nearest
-                chunk_distances = 1.0 - chunk_correlations
-                neighbors[chunk_start:chunk_end] = np.argpartition(
-                    chunk_distances, kth=knn, axis=1
-                )[:, :knn]
+            with tqdm(total=n_cells, desc="Finding neighbors", unit="cells") as pbar:
+                for chunk_start in range(0, n_cells, knn_chunksize):
+                    chunk_end = min(chunk_start + knn_chunksize, n_cells)
+                    chunk_size = chunk_end - chunk_start
 
-                # Immediately discard to free memory
-                del chunk_correlations, chunk_distances
+                    # Compute correlations from chunk to ALL cells
+                    # Shape: (chunk_size, n_cells) - manageable memory
+                    chunk_correlations = X_norm[chunk_start:chunk_end] @ X_norm.T
+                    chunk_distances = 1.0 - chunk_correlations
+                    del chunk_correlations
 
-                pbar.update(chunk_end - chunk_start)
+                    # Exclude self by setting self-distance to infinity
+                    diag_idx = np.arange(chunk_size)
+                    chunk_distances[diag_idx, chunk_start + diag_idx] = np.inf
 
-        del X_norm
+                    # Find knn-1 nearest actual neighbors (excluding self)
+                    top_k_idx = np.argpartition(
+                        chunk_distances, kth=knn - 1, axis=1
+                    )[:, :knn - 1]
+                    actual_neighbors[chunk_start:chunk_end] = top_k_idx
+                    actual_dists[chunk_start:chunk_end] = np.take_along_axis(
+                        chunk_distances, top_k_idx, axis=1
+                    )
+
+                    del chunk_distances
+                    pbar.update(chunk_size)
+
+            del X_norm
+
+        # Save KNN distance matrix (without self-loops) for reuse and LOF
+        row_indices = np.repeat(np.arange(n_cells), knn - 1)
+        col_indices = actual_neighbors.ravel()
+        values = actual_dists.ravel().astype(np.float64)
+        adata.obsp['correlation_distance_kNN'] = spsparse.csr_matrix(
+            (values, (row_indices, col_indices)), shape=(n_cells, n_cells)
+        )
+        print(f"  Saved KNN distance matrix to adata.obsp['correlation_distance_kNN'] "
+              f"({knn - 1} neighbors per cell)", flush=True)
+        del actual_dists
+
+        # Prepend self for smoothing (self + knn-1 actual = knn total)
+        self_col = np.arange(n_cells).reshape(-1, 1)
+        neighbors = np.concatenate(
+            [self_col, actual_neighbors.astype(np.int64)], axis=1
+        )
+        del actual_neighbors
 
     # Get full expression matrix for smoothing in chunks
     # This avoids having full sparse + full dense in memory simultaneously
