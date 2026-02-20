@@ -284,28 +284,69 @@ def knn_smooth_gene_expression(
     # Free X_subset memory before loading full_X
     del X_subset
 
-    # Step 2: Find KNN in chunks WITHOUT storing full correlation matrix
-    # This avoids O(n²) memory which would be ~2.95TB for 607K cells
-    neighbors = np.empty((n_cells, knn), dtype=np.int64)
+    # Try cuML for GPU-accelerated KNN
+    cumlNN = None
+    if USING_GPU:
+        try:
+            from cuml.neighbors import NearestNeighbors as cumlNN
+        except ImportError:
+            cumlNN = None
+            print(
+                "  cuML not found — falling back to CPU. "
+                "For GPU-accelerated KNN on CUDA, install cuML then restart Python:\n"
+                '    pip install "cuml-cu12>=23.02" --extra-index-url=https://pypi.nvidia.com\n'
+                "  Note: cuML currently requires Python <=3.11; "
+                "it may not be available for Python 3.12+."
+            )
 
-    with tqdm(total=n_cells, desc="Finding neighbors", unit="cells") as pbar:
-        for chunk_start in range(0, n_cells, knn_chunksize):
-            chunk_end = min(chunk_start + knn_chunksize, n_cells)
+    # Step 2: Find KNN
+    if cumlNN is not None:
+        # === GPU KNN path (cuML NN-descent, O(N log N)) ===
+        # Row-normalised above; d_euclid² = 2 × d_corr → same KNN neighbours.
+        X_norm_f32 = X_norm.astype(np.float32)  # cuML requires float32
+        del X_norm
 
-            # Compute correlations from chunk to ALL cells
-            # Shape: (chunk_size, n_cells) - manageable memory
-            chunk_correlations = X_norm[chunk_start:chunk_end] @ X_norm.T
+        print(f"  Computing KNN ({n_cells:,} cells) on CUDA GPU...", flush=True)
+        nn = cumlNN(n_neighbors=knn, metric="euclidean")
+        nn.fit(X_norm_f32)
+        gpu_dists_euclid, gpu_indices = nn.kneighbors(X_norm_f32)
+        del nn, X_norm_f32  # free GPU memory
 
-            # Convert to distances and find k-nearest
-            chunk_distances = 1.0 - chunk_correlations
-            neighbors[chunk_start:chunk_end] = np.argpartition(
-                chunk_distances, kth=knn, axis=1
-            )[:, :knn]
+        # Convert Euclidean → correlation distances: d_corr = d_euclid² / 2
+        # (not used for smoothing, but documents equivalence with CPU path)
+        gpu_dists_corr = np.asarray(gpu_dists_euclid) ** 2 / 2
+        del gpu_dists_euclid, gpu_dists_corr
 
-            # Immediately discard to free memory
-            del chunk_correlations, chunk_distances
+        neighbors = np.asarray(gpu_indices).astype(np.int64)
+        del gpu_indices
 
-            pbar.update(chunk_end - chunk_start)
+    else:
+        # === CPU KNN path (chunked BLAS matmul, O(N²)) ===
+        _n_cpu = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+        print(f"  Computing KNN ({n_cells:,} cells) on CPU ({_n_cpu} cores available)...", flush=True)
+
+        neighbors = np.empty((n_cells, knn), dtype=np.int64)
+
+        with tqdm(total=n_cells, desc="Finding neighbors", unit="cells") as pbar:
+            for chunk_start in range(0, n_cells, knn_chunksize):
+                chunk_end = min(chunk_start + knn_chunksize, n_cells)
+
+                # Compute correlations from chunk to ALL cells
+                # Shape: (chunk_size, n_cells) - manageable memory
+                chunk_correlations = X_norm[chunk_start:chunk_end] @ X_norm.T
+
+                # Convert to distances and find k-nearest
+                chunk_distances = 1.0 - chunk_correlations
+                neighbors[chunk_start:chunk_end] = np.argpartition(
+                    chunk_distances, kth=knn, axis=1
+                )[:, :knn]
+
+                # Immediately discard to free memory
+                del chunk_correlations, chunk_distances
+
+                pbar.update(chunk_end - chunk_start)
+
+        del X_norm
 
     # Get full expression matrix for smoothing in chunks
     # This avoids having full sparse + full dense in memory simultaneously
