@@ -786,6 +786,7 @@ def get_gene_cluster_cell_UMAPs(
                 precomputed_knn=(cuml_indices, cuml_dists),
             ).fit(X_norm)
             gene_cluster_embeddings.append(np.asarray(embedding_model.embedding_))
+            del embedding_model  # free GPU memory held by cuML UMAP model
 
         else:
             # === CPU path ===
@@ -858,6 +859,7 @@ def plot_gene_cluster_cell_UMAPs(
                     embedding[label_idxs, 1],
                     s=marker_size,
                     label=label,
+                    edgecolors='none',
                 )
             ax.set_xticks([])
             ax.set_yticks([])
@@ -903,6 +905,7 @@ def plot_gene_cluster_cell_UMAPs(
                 s=marker_size,
                 c=expression[Order],
                 cmap="seismic",
+                edgecolors='none',
             )
             ax.set_title(
                 f"Gene Cluster {gene_cluster_labels[idx]} ({len(gene_cluster_selected_genes[idx])} genes)",
