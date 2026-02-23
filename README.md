@@ -26,13 +26,13 @@ Datasets for reproducing the example workflows may be found at the following Men
 Install the latest version:
 
 ```
-pip install git+https://github.com/aradley/ESFS.git
+pip install git+https://github.com/aradley/ESFS.git@memory_optimised
 ```
 
 or clone and then install:
 
 ```
-git clone git@github.com:aradley/ESFS.git
+git clone -b memory_optimised git@github.com:aradley/ESFS.git
 cd ESFS
 pip install .
 ```
