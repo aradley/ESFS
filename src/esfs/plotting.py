@@ -682,8 +682,9 @@ def plot_top_ranked_genes_UMAP(
 
 def get_gene_cluster_cell_UMAPs(
     adata,
-    gene_clust_labels: np.ndarray,
-    top_ESS_genes: np.ndarray,
+    gene_clust_labels: Optional[np.ndarray] = None,
+    top_ESS_genes: Optional[np.ndarray] = None,
+    *,
     n_neighbors: int,
     min_dist: float,
     log_transformed: bool,
@@ -691,16 +692,34 @@ def get_gene_cluster_cell_UMAPs(
     metric: str = "correlation",
     random_state: Optional[int] = None,
     memory_limit_gb: float = 5.0,
+    specific_genes: Optional[Union[List[str], np.ndarray]] = None,
+    return_model: bool = False,
     **kwargs,
 ):
     print(
         "Generating the cell UMAP embeddings for each cluster of genes from the previous function.",
         flush=True,
     )
-    if specific_cluster is None:
-        unique_gene_clust_labels = list(np.unique(gene_clust_labels))
+    # Validate mutually exclusive parameters
+    if specific_genes is not None and specific_cluster is not None:
+        raise ValueError(
+            "Cannot use 'specific_genes' and 'specific_cluster' together. "
+            "'specific_genes' bypasses cluster-based gene selection entirely, "
+            "so 'specific_cluster' has no meaning when 'specific_genes' is provided. "
+            "Please use one or the other."
+        )
+    # Require cluster params when specific_genes is not used
+    if specific_genes is None and (gene_clust_labels is None or top_ESS_genes is None):
+        raise ValueError(
+            "'gene_clust_labels' and 'top_ESS_genes' are required when 'specific_genes' is not provided."
+        )
+    # Determine loop items based on specific_genes vs cluster-based selection
+    if specific_genes is not None:
+        loop_items = [None]  # single iteration; genes are pre-specified
+    elif specific_cluster is None:
+        loop_items = list(np.unique(gene_clust_labels))
     else:
-        unique_gene_clust_labels = [specific_cluster]
+        loop_items = [specific_cluster]
     # Create containers for the selected genes and embeddings
     gene_cluster_selected_genes = []
     gene_cluster_embeddings = []
@@ -723,12 +742,17 @@ def get_gene_cluster_cell_UMAPs(
                 "  Note: cuML currently requires Python ≤3.11; it may not be available for Python 3.12+."
             )
 
-    for lbl in unique_gene_clust_labels:
-        lbl_list = lbl if isinstance(lbl, (list, np.ndarray)) else [lbl]
-        display_label = ", ".join(str(x) for x in lbl_list)
-        plural = "s" if len(lbl_list) > 1 else ""
-        print(f"Plotting cell UMAP using gene cluster{plural} {display_label}", flush=True)
-        selected_genes = top_ESS_genes[np.isin(gene_clust_labels, lbl_list)].tolist()
+    for lbl in loop_items:
+        if specific_genes is not None:
+            display_label = "Custom Gene Set"
+            selected_genes = list(specific_genes)
+            print(f"Plotting cell UMAP using {len(selected_genes)} user-specified genes", flush=True)
+        else:
+            lbl_list = lbl if isinstance(lbl, (list, np.ndarray)) else [lbl]
+            display_label = ", ".join(str(x) for x in lbl_list)
+            plural = "s" if len(lbl_list) > 1 else ""
+            print(f"Plotting cell UMAP using gene cluster{plural} {display_label}", flush=True)
+            selected_genes = top_ESS_genes[np.isin(gene_clust_labels, lbl_list)].tolist()
         display_labels.append(display_label)
         if len(selected_genes) == 0:
             print(f"No genes found in cluster {lbl}, skipping this cluster.")
@@ -785,8 +809,11 @@ def get_gene_cluster_cell_UMAPs(
                 random_state=random_state,
                 precomputed_knn=(cuml_indices, cuml_dists),
             ).fit(X_norm)
-            gene_cluster_embeddings.append(np.asarray(embedding_model.embedding_))
-            del embedding_model  # free GPU memory held by cuML UMAP model
+            if return_model:
+                gene_cluster_embeddings.append(embedding_model)
+            else:
+                gene_cluster_embeddings.append(np.asarray(embedding_model.embedding_))
+                del embedding_model  # free GPU memory held by cuML UMAP model
 
         else:
             # === CPU path ===
@@ -816,7 +843,10 @@ def get_gene_cluster_cell_UMAPs(
                 precomputed_knn=precomputed_knn,
                 **kwargs,
             ).fit(reduced_input_data)
-            gene_cluster_embeddings.append(embedding_model.embedding_)
+            if return_model:
+                gene_cluster_embeddings.append(embedding_model)
+            else:
+                gene_cluster_embeddings.append(embedding_model.embedding_)
     # Store display labels in adata for use by plot function
     adata.uns['gene_cluster_labels'] = display_labels
     return gene_cluster_embeddings, gene_cluster_selected_genes
