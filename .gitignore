@@ -204,3 +204,7 @@ __marimo__/
 
 # Mac
 .DS_Store
+
+# Development / testing (not distributed)
+tests/
+Claude_Dev_Folder/
