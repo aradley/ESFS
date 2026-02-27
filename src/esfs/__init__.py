@@ -23,6 +23,8 @@ from .plotting import (
     plot_top_ranked_genes_UMAP,
     get_gene_cluster_cell_UMAPs,
     plot_gene_cluster_cell_UMAPs,
+    save_umap_model,
+    load_umap_model,
 )
 
 # Re-assign backend module after imports
@@ -51,4 +53,6 @@ __all__ = [
     "plot_top_ranked_genes_UMAP",
     "get_gene_cluster_cell_UMAPs",
     "plot_gene_cluster_cell_UMAPs",
+    "save_umap_model",
+    "load_umap_model",
 ]

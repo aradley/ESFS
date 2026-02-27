@@ -178,6 +178,84 @@ def _add_self_loops(knn_indices, knn_dists):
     )
 
 
+def _cuml_to_umap_learn(
+    embedding,
+    training_data,
+    knn_indices,
+    knn_dists,
+    n_neighbors,
+    min_dist,
+    random_state=None,
+):
+    """Build a portable umap-learn model from cuML GPU fit results.
+
+    Called immediately after cuML UMAP ``.fit()`` while GPU memory is still
+    valid.  The returned model uses ``metric="correlation"`` and stores the
+    original (non-normalised) training data so that ``.transform()`` works
+    identically to a CPU-fitted model — no manual preprocessing required.
+
+    Parameters
+    ----------
+    embedding : np.ndarray, shape (n_cells, n_components)
+        The fitted embedding, already copied to CPU.
+    training_data : np.ndarray, shape (n_cells, n_genes)
+        The expression matrix that was used for fitting (after optional
+        log-transform, but *before* row-normalisation).
+    knn_indices : np.ndarray, shape (n_cells, n_neighbors)
+        Correlation-distance KNN indices (self excluded).
+    knn_dists : np.ndarray, shape (n_cells, n_neighbors)
+        Correlation distances, sorted ascending (self excluded).
+    n_neighbors : int
+    min_dist : float
+    random_state : int or None
+
+    Returns
+    -------
+    umap.UMAP
+        A fitted umap-learn model supporting ``.transform()`` and
+        ``joblib.dump()``.
+    """
+    from umap.umap_ import fuzzy_simplicial_set, find_ab_params
+
+    model = umap.UMAP(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        n_components=embedding.shape[1],
+        metric="correlation",
+        random_state=random_state,
+    )
+
+    # Core fitted state
+    model.embedding_ = embedding
+    model._raw_data = np.ascontiguousarray(training_data, dtype=np.float32)
+    model._input_hash = None
+
+    # KNN data (umap-learn format: no self-loops)
+    model._knn_indices = knn_indices
+    model._knn_dists = knn_dists
+
+    # Fuzzy simplicial set (the weighted graph used by .transform())
+    rs = np.random.RandomState(random_state if random_state is not None else 42)
+    model.graph_, model._sigmas, model._rhos = fuzzy_simplicial_set(
+        X=model._raw_data,
+        n_neighbors=n_neighbors,
+        random_state=rs,
+        metric="correlation",
+        knn_indices=knn_indices,
+        knn_dists=knn_dists,
+    )
+
+    # Curve parameters for the embedding objective
+    model._a, model._b = find_ab_params(model.spread, model.min_dist)
+
+    # Miscellaneous attributes checked by .transform()
+    model._supervised = False
+    model._small_data = training_data.shape[0] < 4096
+    model._initial_alpha = model.learning_rate
+
+    return model
+
+
 @numba.njit(fastmath=True)
 def _smooth_expression_chunk(full_X, neighbors, start_idx, end_idx):
     """Smooth a chunk of cells by averaging over k neighbors.
@@ -799,7 +877,8 @@ def get_gene_cluster_cell_UMAPs(
 
             # Prepend self-loops (required by cuML UMAP precomputed_knn format)
             cuml_indices, cuml_dists = _add_self_loops(knn_indices_gpu, knn_dists_corr)
-            del knn_indices_gpu, knn_dists_corr
+            if not return_model:
+                del knn_indices_gpu, knn_dists_corr
 
             print("  Running UMAP layout optimisation on CUDA GPU (cuML)...", flush=True)
             embedding_model = cumlUMAP(
@@ -809,8 +888,33 @@ def get_gene_cluster_cell_UMAPs(
                 random_state=random_state,
                 precomputed_knn=(cuml_indices, cuml_dists),
             ).fit(X_norm)
+            del cuml_indices, cuml_dists
             if return_model:
-                gene_cluster_embeddings.append(embedding_model)
+                # Convert to a portable umap-learn model immediately, while
+                # GPU memory is still valid.  The resulting model uses
+                # metric="correlation" with the original training data, so
+                # .transform() behaves identically to a CPU-fitted model.
+                print("  Converting cuML model to portable umap-learn format...", flush=True)
+                try:
+                    embedding = np.asarray(embedding_model.embedding_)
+                    sklearn_model = _cuml_to_umap_learn(
+                        embedding=embedding,
+                        training_data=reduced_input_data,
+                        knn_indices=knn_indices_gpu,
+                        knn_dists=knn_dists_corr,
+                        n_neighbors=effective_n_neighbors,
+                        min_dist=min_dist,
+                        random_state=random_state,
+                    )
+                    gene_cluster_embeddings.append(sklearn_model)
+                except Exception as e:
+                    warnings.warn(
+                        f"cuML-to-umap-learn conversion failed ({type(e).__name__}: {e}). "
+                        f"Returning raw embedding array instead. "
+                        f"To get a saveable model, re-run with ESFS on CPU."
+                    )
+                    gene_cluster_embeddings.append(np.asarray(embedding_model.embedding_))
+                del embedding_model, knn_indices_gpu, knn_dists_corr
             else:
                 gene_cluster_embeddings.append(np.asarray(embedding_model.embedding_))
                 del embedding_model  # free GPU memory held by cuML UMAP model
@@ -1006,3 +1110,86 @@ def plot_gene_cluster_cell_UMAPs(
 #         # Display the GIF inline in Jupyter
 #         with open(gif_path, "rb") as f:
 #             display(Image(data=f.read(), format='png'))
+
+
+# ---------------------------------------------------------------------------
+# UMAP model persistence
+# ---------------------------------------------------------------------------
+
+def save_umap_model(model, gene_list, filepath, log_transformed=False):
+    """Save a fitted UMAP model and its associated gene list to disk.
+
+    The model, gene list, and metadata are bundled into a single file that
+    can be loaded on any machine with ``umap-learn``, ``numpy``, ``scipy``,
+    and ``joblib`` installed (no GPU or cuML required).
+
+    Parameters
+    ----------
+    model : umap.UMAP
+        A fitted umap-learn UMAP model (as returned by
+        ``get_gene_cluster_cell_UMAPs(..., return_model=True)``).
+    gene_list : array-like
+        The genes used to create the embedding.
+    filepath : str or pathlib.Path
+        Output file path (recommended extension: ``.joblib``).
+    log_transformed : bool, default False
+        Whether the training data was log2(X + 1) transformed before
+        fitting.  Stored as metadata so ``load_umap_model`` can report
+        the correct preprocessing steps for ``.transform()``.
+    """
+    from joblib import dump as jl_dump
+
+    # Safety net: if someone passes a raw cuML model, try to convert it
+    if hasattr(model, 'as_sklearn'):
+        warnings.warn(
+            "Received a cuML UMAP model.  Attempting as_sklearn() conversion — "
+            "if this fails, use get_gene_cluster_cell_UMAPs(return_model=True) "
+            "which converts automatically."
+        )
+        model = model.as_sklearn()
+
+    bundle = {
+        "model": model,
+        "gene_list": np.asarray(gene_list),
+        "log_transformed": log_transformed,
+    }
+    jl_dump(bundle, filepath)
+    print(f"UMAP model saved to '{filepath}'")
+
+
+def load_umap_model(filepath):
+    """Load a UMAP model bundle previously saved with :func:`save_umap_model`.
+
+    Parameters
+    ----------
+    filepath : str or pathlib.Path
+        Path to the saved ``.joblib`` file.
+
+    Returns
+    -------
+    dict
+        ``'model'`` : umap.UMAP — the fitted model (supports ``.transform()``).
+        ``'gene_list'`` : np.ndarray — genes used for the embedding.
+        ``'log_transformed'`` : bool — whether log2(X + 1) was applied to
+        the training data.
+
+    Examples
+    --------
+    >>> bundle = esfs.load_umap_model("cluster_0_model.joblib")
+    >>> model = bundle['model']
+    >>> gene_list = bundle['gene_list']
+    >>> new_X = new_adata[:, gene_list].X.toarray()
+    >>> if bundle['log_transformed']:
+    ...     new_X = np.log2(new_X + 1)
+    >>> new_embedding = model.transform(new_X)
+    """
+    from joblib import load as jl_load
+
+    bundle = jl_load(filepath)
+    if not isinstance(bundle, dict) or "model" not in bundle:
+        raise ValueError(
+            f"'{filepath}' does not appear to be an ESFS UMAP model bundle. "
+            f"Expected a dict with key 'model'."
+        )
+    print(f"UMAP model loaded from '{filepath}'")
+    return bundle
