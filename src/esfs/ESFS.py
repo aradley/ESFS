@@ -227,48 +227,73 @@ def parallel_calc_es_matrices(
             "You have provided a 'secondary_features_label', implying that in the anndata object there is a corresponding csc_sparse martix object with rows as samples and columns as features. Each feature will be used to calculate ES scores for each of the variables of the adata object"
         )
         secondary_features = adata.obsm[secondary_features_label]
-    # Ensure sparse csc matrix with appropriate backend (handles GPU<->CPU switching)
-    secondary_features = _convert_sparse_array(secondary_features)
-    # When on CPU, ensure it's scipy sparse (in case _convert_sparse_array missed something)
-    if not USING_GPU:
-        secondary_features = _ensure_numpy(secondary_features)
-        if not spsparse.issparse(secondary_features):
-            secondary_features = spsparse.csc_matrix(secondary_features)
-        # Ensure indices are sorted (required for two-pointer merge algorithm in Numba)
-        secondary_features.sort_indices()
+    # Always keep secondary_features on CPU as scipy CSC. For the GPU path, per-chunk slices
+    # are transferred to GPU inside calc_es_metrics_vec, keeping peak GPU memory at ~5% of
+    # the full matrix rather than requiring the entire matrix on the GPU simultaneously.
+    secondary_features = _convert_sparse_array(secondary_features, to_scipy=True)
+    if not spsparse.issparse(secondary_features):
+        secondary_features = spsparse.csc_matrix(secondary_features)
+    # Ensure indices are sorted (required for two-pointer merge algorithm in Numba and CUDA)
+    secondary_features.sort_indices()
     #
     ## Create the global global_scaled_matrix array for faster parallel computing calculations
     global global_scaled_matrix
-    global_scaled_matrix = _convert_sparse_array(adata.layers["Scaled_Counts"])
-    # When on CPU, ensure it's scipy sparse
-    if not USING_GPU:
-        global_scaled_matrix = _ensure_numpy(global_scaled_matrix)
+    _sc = adata.layers["Scaled_Counts"]
+    _nnz = _sc.nnz if hasattr(_sc, "nnz") else _sc.data.shape[0]
+    _INT32_MAX = int(np.iinfo(np.int32).max)
+    # CuPy sparse matrices force-cast indptr to int32, so nnz > INT32_MAX corrupts the CSC
+    # structure and causes cudaErrorIllegalAddress in the CUDA kernel. In that case we keep
+    # global_scaled_matrix on CPU and transfer int32-safe sub-chunks in get_overlap_info_vec.
+    _gs_large = USING_GPU and (_nnz > _INT32_MAX)
+    if USING_GPU and not _gs_large:
+        # Normal GPU path: nnz fits in int32 — convert to CuPy once and reuse across chunks
+        global_scaled_matrix = _convert_sparse_array(_sc)
+    else:
+        # CPU path OR large-dataset GPU path: keep on CPU as scipy CSC
+        global_scaled_matrix = _convert_sparse_array(_sc, to_scipy=True)
         if not spsparse.issparse(global_scaled_matrix):
             global_scaled_matrix = spsparse.csc_matrix(global_scaled_matrix)
-        # Ensure indices are sorted (required for two-pointer merge algorithm in Numba)
         global_scaled_matrix.sort_indices()
+    if _gs_large:
+        # Compute how many sub-chunks will be needed (informational print only)
+        _SAFE = int(_INT32_MAX * 0.95)
+        _iptr = np.asarray(_sc.indptr, dtype=np.int64)
+        _n_gs = _sc.shape[1]
+        _count = 0
+        _j0 = 0
+        while _j0 < _n_gs:
+            _cumnnz = _iptr[_j0 + 1:] - _iptr[_j0]
+            _safe = int(np.searchsorted(_cumnnz, _SAFE, side="left"))
+            _j0 = min(_j0 + max(1, _safe), _n_gs)
+            _count += 1
+        print(
+            f"Note: {_nnz:,} non-zeros exceed the int32 GPU limit ({_INT32_MAX:,}). "
+            f"global_scaled_matrix will be split into {_count} sub-chunk(s) per overlap computation. "
+            f"The progress bar below shows secondary-feature chunks; each step runs {_count} GPU kernel call(s)."
+        )
     ## Extract sample and feature cardinality
     sample_cardinality = global_scaled_matrix.shape[0]
-    ## Calculate feature sums and minority states for each adata feature
+    ## Calculate feature sums and minority states — always compute on CPU side first,
+    ## then move the small result arrays (n_genes elements) to GPU if needed.
     global feature_sums
-    if not USING_GPU:
-        feature_sums = np.asarray(global_scaled_matrix.sum(axis=0)).flatten()
-    else:
-        feature_sums = global_scaled_matrix.sum(axis=0).flatten()
     global minority_states
-    minority_states = feature_sums.copy()
-    if not USING_GPU:
-        # Use numpy explicitly when on CPU
-        idxs = np.where(minority_states >= (sample_cardinality / 2))[0]
+    if spsparse.issparse(global_scaled_matrix):
+        feature_sums_np = np.asarray(global_scaled_matrix.sum(axis=0)).flatten()
     else:
-        idxs = xp.where(minority_states >= (sample_cardinality / 2))[0]
-    minority_states[idxs] = sample_cardinality - minority_states[idxs]
+        # CuPy sparse: .sum() returns CuPy array; .get() converts to numpy
+        feature_sums_np = np.asarray(global_scaled_matrix.sum(axis=0).get()).flatten()
+    minority_states_np = feature_sums_np.copy()
+    idxs = np.where(minority_states_np >= (sample_cardinality / 2))[0]
+    minority_states_np[idxs] = sample_cardinality - minority_states_np[idxs]
+    if USING_GPU:
+        feature_sums = xp.asarray(feature_sums_np)       # tiny (n_genes elements)
+        minority_states = xp.asarray(minority_states_np)
+    else:
+        feature_sums = feature_sums_np
+        minority_states = minority_states_np
     ####
-    ## Provide indicies for parallel computing.
-    if not USING_GPU:
-        feature_inds = np.arange(secondary_features.shape[1])
-    else:
-        feature_inds = xp.arange(secondary_features.shape[1])
+    ## Provide indices for parallel computing — always numpy since secondary_features is scipy
+    feature_inds = np.arange(secondary_features.shape[1])
     # Get number of cores to use
     use_cores = get_num_cores(use_cores)
     ## Perform calculations
@@ -523,9 +548,17 @@ def calc_es_metrics_vec(
         minority_states = np.asarray(_ensure_numpy(minority_states))
 
     ## Extract the Fixed Feature (FF)
+    # secondary_features is always scipy CSC (kept on CPU for all backends).
     fixed_features = secondary_features[:, feature_inds]
-    # Ensure fixed_features is in the correct format for current backend
-    if not USING_GPU:
+    # Convert to the correct backend format.
+    if USING_GPU:
+        # GPU path: convert this scipy chunk to CuPy sparse for the CUDA kernel.
+        # Chunk nnz ≈ 5% of total (controlled by the outer loop) so always within int32.
+        fixed_features = fixed_features.tocsc()
+        fixed_features.sort_indices()
+        fixed_features = xpsparse.csc_matrix(fixed_features)
+    else:
+        # CPU or MLX path: ensure scipy CSC with sorted indices
         fixed_features = _ensure_numpy(fixed_features)
         if not spsparse.issparse(fixed_features):
             fixed_features = spsparse.csc_matrix(fixed_features)
@@ -577,7 +610,7 @@ def calc_es_metrics_vec(
         ff_indptr = np.ascontiguousarray(ff_csc.indptr, dtype=np.int32)
         gs_data = np.ascontiguousarray(global_scaled_matrix.data, dtype=target_dtype)
         gs_indices = np.ascontiguousarray(global_scaled_matrix.indices, dtype=np.int32)
-        gs_indptr = np.ascontiguousarray(global_scaled_matrix.indptr, dtype=np.int32)
+        gs_indptr = np.ascontiguousarray(global_scaled_matrix.indptr, dtype=np.int64)
         all_ESSs, all_EPs, all_SWs, all_SGs = _fused_overlap_ess_numba(
             ff_data, ff_indices, ff_indptr,
             gs_data, gs_indices, gs_indptr,
@@ -597,6 +630,10 @@ def calc_es_metrics_vec(
             fixed_features, fixed_features_cardinality, sample_cardinality,
             feature_sums, FF_QF_vs_RF,
         )
+        # Overlaps are computed — free the GPU copy of this chunk to reclaim VRAM
+        if USING_GPU:
+            del fixed_features
+            xp.get_default_memory_pool().free_all_blocks()
         all_ESSs, all_D_EPs, all_O_EPs, all_SWs, all_SGs = calc_ESSs_chunked(
             RFms, QFms, RFMs, QFMs, max_ent_options,
             sample_cardinality, overlaps, inverse_overlaps,
@@ -625,35 +662,93 @@ def get_overlap_info_vec(
 
     if USING_GPU:
         fixed_features_csc = fixed_features.tocsc()
-        global_scaled_matrix_csc = global_scaled_matrix.tocsc()
+        n_ff = fixed_features.shape[1]
+        n_gs = int(feature_sums.shape[0])  # total number of global features
 
-        # Allocate output arrays with configured precision
-        overlaps = xp.zeros((fixed_features.shape[1], feature_sums.shape[0]), dtype=backend.dtype)
-        inverse_overlaps = xp.zeros((fixed_features.shape[1], feature_sums.shape[0]), dtype=backend.dtype)
+        # Pre-allocate full output arrays on GPU for this secondary-feature chunk
+        overlaps         = xp.zeros((n_ff, n_gs), dtype=backend.dtype)
+        inverse_overlaps = xp.zeros((n_ff, n_gs), dtype=backend.dtype)
 
-        # Single combined kernel call (computes both overlaps and inverse_overlaps in one pass)
-        kernel = overlaps_and_inverse_cuda(use_float64=use_float64)
-        block = (16, 16)
-        grid = (
-            (fixed_features.shape[1] + block[0] - 1) // block[0],
-            (feature_sums.shape[0] + block[1] - 1) // block[1],
-        )
-        kernel(
-            grid,
-            block,
-            (
-                fixed_features_csc.data.astype(backend.dtype),
-                fixed_features_csc.indices,
-                fixed_features_csc.indptr,
-                global_scaled_matrix_csc.data.astype(backend.dtype),
-                global_scaled_matrix_csc.indices,
-                global_scaled_matrix_csc.indptr,
-                overlaps.ravel(),
-                inverse_overlaps.ravel(),
-                fixed_features.shape[1],
-                feature_sums.shape[0],
-            ),
-        )
+        kernel        = overlaps_and_inverse_cuda(use_float64=use_float64)
+        block         = (16, 16)
+        ff_data_gpu   = fixed_features_csc.data.astype(backend.dtype)
+        ff_idx_gpu    = fixed_features_csc.indices
+        ff_indptr_gpu = fixed_features_csc.indptr
+
+        if spsparse.issparse(global_scaled_matrix):
+            # Large-dataset path: global_scaled_matrix kept on CPU (nnz > INT32_MAX).
+            # Sub-chunk it so each GPU transfer stays within int32.
+            # Boundary calculation uses the actual per-column nnz from indptr —
+            # non-uniform sparsity (e.g. all dense genes in the first half) is handled
+            # correctly because we greedily pack columns by real nnz, not by position.
+            INT32_MAX    = int(np.iinfo(np.int32).max)
+            SAFE_NNZ_MAX = int(INT32_MAX * 0.95)    # 5% safety margin
+            gs_indptr_np = np.asarray(global_scaled_matrix.indptr, dtype=np.int64)
+
+            # Greedy boundary computation: pack as many columns as possible
+            # into each sub-chunk while keeping cumulative nnz <= SAFE_NNZ_MAX
+            js_boundaries = [0]
+            while js_boundaries[-1] < n_gs:
+                j0 = js_boundaries[-1]
+                cumnnz = gs_indptr_np[j0 + 1:] - gs_indptr_np[j0]
+                safe   = int(np.searchsorted(cumnnz, SAFE_NNZ_MAX, side="left"))
+                j1     = min(j0 + max(1, safe), n_gs)
+                if j1 >= n_gs:
+                    break
+                js_boundaries.append(j1)
+            js_boundaries.append(n_gs)
+
+            gs_data_np    = global_scaled_matrix.data
+            gs_indices_np = global_scaled_matrix.indices
+
+            for js, je in zip(js_boundaries[:-1], js_boundaries[1:]):
+                nnz_s    = int(gs_indptr_np[js])
+                nnz_e    = int(gs_indptr_np[je])
+                n_gs_sub = je - js
+
+                # Transfer raw arrays for this sub-chunk to GPU (no full CuPy sparse object)
+                gs_data_gpu    = xp.asarray(gs_data_np[nnz_s:nnz_e].astype(backend.dtype))
+                gs_indices_gpu = xp.asarray(gs_indices_np[nnz_s:nnz_e].astype(np.int32))
+                # Zero-based indptr for sub-chunk (values guaranteed within int32 by SAFE_NNZ_MAX)
+                gs_indptr_sub = (gs_indptr_np[js:je + 1] - gs_indptr_np[js]).astype(np.int32)
+                gs_indptr_gpu = xp.asarray(gs_indptr_sub)
+
+                grid = (
+                    (n_ff    + block[0] - 1) // block[0],
+                    (n_gs_sub + block[1] - 1) // block[1],
+                )
+                kernel(
+                    grid, block,
+                    (
+                        ff_data_gpu, ff_idx_gpu, ff_indptr_gpu,
+                        gs_data_gpu, gs_indices_gpu, gs_indptr_gpu,
+                        overlaps.ravel(), inverse_overlaps.ravel(),
+                        n_ff, n_gs_sub,
+                        n_gs, js,   # n_features_total, j_offset
+                    ),
+                )
+                del gs_data_gpu, gs_indices_gpu, gs_indptr_gpu
+                xp.get_default_memory_pool().free_all_blocks()
+        else:
+            # Normal path: global_scaled_matrix is CuPy (nnz <= INT32_MAX), single kernel call.
+            # Pass j_offset=0 and n_features_total=n_gs (same as before, just with new params).
+            global_scaled_matrix_csc = global_scaled_matrix.tocsc()
+            grid = (
+                (n_ff + block[0] - 1) // block[0],
+                (n_gs  + block[1] - 1) // block[1],
+            )
+            kernel(
+                grid, block,
+                (
+                    ff_data_gpu, ff_idx_gpu, ff_indptr_gpu,
+                    global_scaled_matrix_csc.data.astype(backend.dtype),
+                    global_scaled_matrix_csc.indices,
+                    global_scaled_matrix_csc.indptr,
+                    overlaps.ravel(), inverse_overlaps.ravel(),
+                    n_ff, n_gs,
+                    n_gs, 0,   # n_features_total=n_gs, j_offset=0 (single chunk)
+                ),
+            )
     elif USING_MLX:
         from .backend_mlx import overlaps_and_inverse_mlx
         fixed_features_csc = fixed_features.tocsc()
@@ -671,7 +766,7 @@ def get_overlap_info_vec(
         ff_indptr = np.ascontiguousarray(_ensure_numpy(fixed_features.indptr), dtype=np.int32)
         gs_data = np.ascontiguousarray(_ensure_numpy(global_scaled_matrix.data), dtype=target_dtype)
         gs_indices = np.ascontiguousarray(_ensure_numpy(global_scaled_matrix.indices), dtype=np.int32)
-        gs_indptr = np.ascontiguousarray(_ensure_numpy(global_scaled_matrix.indptr), dtype=np.int32)
+        gs_indptr = np.ascontiguousarray(_ensure_numpy(global_scaled_matrix.indptr), dtype=np.int64)
         overlaps, inverse_overlaps = overlaps_and_inverse_sparse(
             ff_data,
             ff_indices,
@@ -771,12 +866,14 @@ def overlaps_and_inverse_cuda(use_float64=False):
         {dtype_cuda}* overlaps,
         {dtype_cuda}* inverse_overlaps,
         int n_fixed_features,
-        int n_features) {{
+        int n_features_subchunk,
+        int n_features_total,
+        int j_offset) {{
 
         int i = blockIdx.x * blockDim.x + threadIdx.x;  // fixed_feature index
-        int j = blockIdx.y * blockDim.y + threadIdx.y;  // feature index
+        int j = blockIdx.y * blockDim.y + threadIdx.y;  // local feature index within subchunk
 
-        if (i >= n_fixed_features || j >= n_features) return;
+        if (i >= n_fixed_features || j >= n_features_subchunk) return;
 
         // Get column ranges for CSC format
         int ff_start = ff_indptr[i];
@@ -822,8 +919,9 @@ def overlaps_and_inverse_cuda(use_float64=False):
             gs_ptr++;
         }}
 
-        // Store results
-        int idx = i * n_features + j;
+        // Store results at the correct position in the full (pre-allocated) output array.
+        // j_offset shifts the local column index j to the global column index.
+        int idx = i * n_features_total + (j + j_offset);
         overlaps[idx] = overlap_sum;
         inverse_overlaps[idx] = inverse_overlap_sum;
     }}
