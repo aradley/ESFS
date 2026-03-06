@@ -8,7 +8,7 @@
 
 Identify the combination of cell clusters that maximally correlates with the expression profile of each gene — without requiring any prior knowledge of marker genes.
 
-ES-CCF takes a set of secondary features derived from cell cluster labels (typically one-hot encoded cluster assignments) and finds which *combination* of clusters best characterises each gene. This turns the intractable combinatorial search into a tractable linear problem by sorting cluster contributions using the SG (Sort Grade) direction metric.
+ES-CCF takes a set of secondary features derived from cell cluster labels (typically one-hot encoded cluster assignments) and finds which *combination* of clusters best characterises each gene. This turns the intractable combinatorial search into a tractable linear problem by sorting cluster contributions using the SG (Sort Gain) metric.
 
 Requires both `ESSs` and `SGs` to have been calculated by `parallel_calc_es_matrices()` for the given `secondary_features_label`.
 

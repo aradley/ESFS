@@ -6,11 +6,6 @@
 
 ESFS is an Entropy Sorting based feature selection package primarily developed for feature selection and marker gene identification in single cell RNA sequencing datasets.
 
-> **Looking for the paper version?** Install v1.0.0 for exact reproducibility:
-> ```
-> pip install git+https://github.com/aradley/ESFS.git@v1.0.0
-> ```
-
 ## Documentation
 
 Full documentation is available in the [`docs/`](docs/) folder:
@@ -30,3 +25,7 @@ Datasets for reproducing the example workflows are available at the [figshare re
 ![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
 
 
+> **Looking for the paper version?** Install v1.0.0 for exact reproducibility:
+> ```
+> pip install git+https://github.com/aradley/ESFS.git@v1.0.0
+> ```

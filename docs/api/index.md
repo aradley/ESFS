@@ -7,6 +7,9 @@
 | ES | Entropy Sorting |
 | ESS | Entropy Sort Score |
 | EP | Error Potential |
+| SW | Sort Weight |
+| SG | Sort Gain |
+| SD | Sort Direction |
 | ES-GSS | Entropy Sorting Gene Set Selection |
 | ES-CCF | Entropy Sorting Combinatorial Cluster Finder |
 | ES-FMG | Entropy Sorting Find Marker Genes |

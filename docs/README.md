@@ -35,7 +35,7 @@ Full documentation for all public functions.
 | Function | Description |
 |----------|-------------|
 | [`create_scaled_matrix()`](api/preprocessing.md#create_scaled_matrix) | Scale expression data to [0, 1] and filter low-expression genes |
-| [`parallel_calc_es_matrices()`](api/preprocessing.md#parallel_calc_es_matrices) | Calculate pairwise ES metrics (ESS, EP) for all feature pairs — the ES-GSS step |
+| [`parallel_calc_es_matrices()`](api/preprocessing.md#parallel_calc_es_matrices) | Calculate pairwise ES metrics (ESS, EP, SW, SG, SD) for all feature pairs — the ES-GSS step |
 
 ### [Algorithms](api/algorithms.md)
 

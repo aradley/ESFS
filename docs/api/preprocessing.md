@@ -51,7 +51,8 @@ For each pair of features, four ES metrics are computed:
 - **ESS (Entropy Sort Score)** — the primary correlation metric; measures how strongly the expression of one feature predicts the ordering of another
 - **EP (Error Potential)** — a statistical significance measure for the ESS
 - **SW (Sort Weight)** — a secondary weighting metric
-- **SG (Sort Grade)** — a direction indicator (positive/negative correlation)
+- **SG (Sort Gain)** — a gain metric for the sort relationship
+- **SD (Sort Direction)** — indicates the direction (positive/negative) of the sort relationship
 
 By default, all genes in `adata` are compared pairwise against each other (`secondary_features_label="Self"`). Alternatively, you can compare against a separate set of features stored in `adata.obsm`.
 
