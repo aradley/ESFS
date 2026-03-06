@@ -20,7 +20,7 @@ ESFS provides three main algorithms:
 ## Quick install
 
 ```bash
-pip install git+https://github.com/aradley/ESFS.git
+pip install git+https://github.com/aradley/ESFS.git@memory_optimised
 ```
 
 See [Installation](installation.md) for GPU acceleration options (NVIDIA/CUDA and Apple Silicon/MLX).

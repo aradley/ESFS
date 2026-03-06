@@ -12,7 +12,7 @@ The default install uses NumPy and Numba for all computations on CPU.
 Install directly from GitHub:
 
 ```bash
-pip install git+https://github.com/aradley/ESFS.git
+pip install git+https://github.com/aradley/ESFS.git@memory_optimised
 ```
 
 Or clone and install locally:
@@ -33,7 +33,7 @@ pip install .
 For large datasets on systems with NVIDIA GPUs, ESFS can accelerate the ES matrix calculations via [CuPy](https://cupy.dev/).
 
 ```bash
-pip install "esfs[gpu] @ git+https://github.com/aradley/ESFS.git"
+pip install "esfs[gpu] @ git+https://github.com/aradley/ESFS.git@memory_optimised"
 ```
 
 Or clone and install:
@@ -94,7 +94,7 @@ If this raises an error, check that your CUDA module is loaded and that the CuPy
 For Mac users with Apple Silicon (M1, M2, M3, etc.), ESFS supports GPU acceleration via Apple's [MLX](https://github.com/ml-explore/mlx) framework.
 
 ```bash
-pip install "esfs[mlx] @ git+https://github.com/aradley/ESFS.git"
+pip install "esfs[mlx] @ git+https://github.com/aradley/ESFS.git@memory_optimised"
 ```
 
 Or clone and install:
