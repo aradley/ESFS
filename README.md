@@ -6,6 +6,12 @@
 
 ESFS is an Entropy Sorting based feature selection package primarily developed for feature selection and marker gene identification in single cell RNA sequencing datasets.
 
+Please see our [manuscript](https://www.biorxiv.org/content/10.64898/2026.01.26.701684v1) for details regarding ESFS.
+
+See the [Example Workflows](Example_Workflows/) folder for worked notebooks you may adapt for your own data.
+
+Datasets for reproducing the example workflows are available at the [figshare repository](https://figshare.com/s/4e445e7fa03cc4ccd289).
+
 ## Documentation
 
 Full documentation is available in the [`docs/`](docs/) folder:
@@ -13,12 +19,6 @@ Full documentation is available in the [`docs/`](docs/) folder:
 - [Installation](docs/installation.md)
 - [Getting Started](docs/getting_started.md)
 - [API Reference](docs/api/index.md)
-
-Please see our [manuscript](https://www.biorxiv.org/content/10.64898/2026.01.26.701684v1) for details regarding ESFS.
-
-See the [Example Workflows](Example_Workflows/) folder for worked notebooks you may adapt for your own data.
-
-Datasets for reproducing the example workflows are available at the [figshare repository](https://figshare.com/s/4e445e7fa03cc4ccd289).
 
 ## Software overview
 
