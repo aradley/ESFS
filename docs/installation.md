@@ -1,5 +1,7 @@
 # Installation
 
+ESFS can be installed with CPU-only support or with optional GPU acceleration for NVIDIA (CUDA) or Apple Silicon (MLX) hardware. All three variants automatically fall back to CPU if no compatible GPU is detected, so any install will work on any machine.
+
 ## Requirements
 
 - Python 3.10 or later
