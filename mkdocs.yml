@@ -1,0 +1,46 @@
+site_name: ESFS Documentation
+site_description: Entropy Sorting Feature Selection — feature selection and marker gene identification for single-cell RNA sequencing
+repo_url: https://github.com/aradley/ESFS
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - tables
+  - fenced_code
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Getting Started: getting_started.md
+  - API Reference:
+      - Overview: api/index.md
+      - Preprocessing: api/preprocessing.md
+      - Algorithms: api/algorithms.md
+      - Plotting & Analysis: api/plotting.md
+      - Backend: api/backend.md

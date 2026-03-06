@@ -268,8 +268,7 @@ def parallel_calc_es_matrices(
             _count += 1
         print(
             f"Note: {_nnz:,} non-zeros exceed the int32 GPU limit ({_INT32_MAX:,}). "
-            f"global_scaled_matrix will be split into {_count} sub-chunk(s) per overlap computation. "
-            f"The progress bar below shows secondary-feature chunks; each step runs {_count} GPU kernel call(s)."
+            f"global_scaled_matrix will be split into {_count} sub-chunk(s) per overlap computation."
         )
     ## Extract sample and feature cardinality
     sample_cardinality = global_scaled_matrix.shape[0]

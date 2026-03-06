@@ -11,6 +11,14 @@ ESFS is an Entropy Sorting based feature selection package primarily developed f
 > pip install git+https://github.com/aradley/ESFS.git@v1.0.0
 > ```
 
+## Documentation
+
+Full documentation is available in the [`docs/`](docs/) folder:
+
+- [Installation](docs/installation.md)
+- [Getting Started](docs/getting_started.md)
+- [API Reference](docs/api/index.md)
+
 Please see our manuscript for details regarding ESFS -
 
 Go to the Example_Workflows folder to see some example workflows that you may adapt for your own data.
