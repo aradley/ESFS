@@ -20,6 +20,7 @@ Or clone and install locally:
 ```bash
 git clone git@github.com:aradley/ESFS.git
 cd ESFS
+git checkout memory_optimised
 pip install .
 ```
 
@@ -41,6 +42,7 @@ Or clone and install:
 ```bash
 git clone git@github.com:aradley/ESFS.git
 cd ESFS
+git checkout memory_optimised
 pip install '.[gpu]'
 ```
 
@@ -102,6 +104,7 @@ Or clone and install:
 ```bash
 git clone git@github.com:aradley/ESFS.git
 cd ESFS
+git checkout memory_optimised
 pip install '.[mlx]'
 ```
 

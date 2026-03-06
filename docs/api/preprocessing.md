@@ -87,10 +87,11 @@ adata = esfs.parallel_calc_es_matrices(adata)
 
 - Requires `adata.layers["Scaled_Counts"]` — run `create_scaled_matrix()` first.
 - GPU acceleration (CUDA or MLX) is used automatically if available. See [Backend configuration](backend.md).
-- ES-CCF requires `SGs` to be calculated. If you plan to run `ES_CCF()`, include `"SGs"` in `save_matrices`:
-  ```python
-  adata = esfs.parallel_calc_es_matrices(adata, save_matrices=("ESSs", "EPs", "SGs"))
-  ```
+
+> **Important:** If you plan to run `ES_CCF()`, you **must** include `"SGs"` in `save_matrices` — this is required, not optional:
+> ```python
+> adata = esfs.parallel_calc_es_matrices(adata, save_matrices=("ESSs", "EPs", "SGs"))
+> ```
 
 ### Example
 

@@ -35,4 +35,4 @@ Full documentation for all public functions is available in the [API Reference](
 
 ## Citation
 
-Please cite the ESFS manuscript if you use this package in your work. See `CITATION.cff` in the repository for citation details.
+Please cite the ESFS [manuscript](https://www.biorxiv.org/content/10.64898/2026.01.26.701684v1) if you use this package in your work. Datasets used in the example workflows are available at the [figshare repository](https://figshare.com/s/4e445e7fa03cc4ccd289).

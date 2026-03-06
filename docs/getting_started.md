@@ -13,6 +13,19 @@ An ESFS analysis generally follows this sequence:
 5. *(Optional)* **Identify cluster markers** — use ES-CCF (Entropy Sorting Combinatorial Cluster Finder) with `ES_CCF()` to find, for each gene, the combination of clusters that maximises its ESS correlation
 6. *(Optional)* **Find marker gene sets** — use ES-FMG (Entropy Sorting Find Marker Genes) with `ES_FMG()` to select N genes that maximally capture distinct expression patterns
 
+```mermaid
+flowchart TD
+    A["create_scaled_matrix()"] --> B["parallel_calc_es_matrices()"]
+    B --> C["ES_rank_genes()"]
+    C --> D["plot_top_ranked_genes_UMAP()"]
+    C --> E["get_gene_cluster_cell_UMAPs()"]
+    E --> F["plot_gene_cluster_cell_UMAPs()"]
+    B --> G["ES_CCF() — optional"]
+    G --> H["ES_FMG() — optional"]
+    style G fill:#f5f5f5,stroke:#aaa
+    style H fill:#f5f5f5,stroke:#aaa
+```
+
 ## Example workflows
 
 | Workflow | Dataset | Description |
@@ -20,7 +33,7 @@ An ESFS analysis generally follows this sequence:
 | [Peri-implantation Human Embryo](../Example_Workflows/Peri_implantation_Human_Embryo_Example/Perimplantation_Human_Embryo_Workflow.ipynb) | Human peri-implantation embryo scRNA-seq | Full ESFS pipeline on human embryogenesis data |
 | [Delile 2019 Mouse Neural Tube](../Example_Workflows/Delile2019_Mouse_Neural_Tube/Delile2019_Workflow.ipynb) | Mouse neural tube scRNA-seq (Delile et al. 2019) | Marker gene identification in developing neural tube |
 | [Paragi 2022 Mouse Colon](../Example_Workflows/Paragi2022_Mouse_Colon_Example/Paragi022_Mouse_Colon_Workflow.ipynb) | Mouse colon scRNA-seq (Paragi et al. 2022) | Feature selection in intestinal epithelium |
-| [Ravi 2022 Human Glioblastoma](../Example_Workflows/Ravi2022_Human_Glioblastoma/Ravi_Anlysis_Workflow.ipynb) | Human glioblastoma scRNA-seq (Ravi et al. 2022) | Tumour cell characterisation |
+| [Ravi 2022 Human Glioblastoma](../Example_Workflows/Ravi2022_Human_Glioblastoma/Ravi_Analysis_Workflow.ipynb) | Human glioblastoma scRNA-seq (Ravi et al. 2022) | Tumour cell characterisation |
 
 ## Datasets
 

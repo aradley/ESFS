@@ -104,6 +104,8 @@ chosen_idxs, chosen_genes, pairwise_ESSs = esfs.ES_FMG(
 | `resolution` | `int` | `1` | Controls the trade-off between selecting high-ESS genes and selecting maximally distinct genes. Higher values penalise redundancy more. |
 | `use_cores` | `int` | `-1` | Number of CPU cores to use. `-1` uses all available minus one. |
 
+> **Tip:** Start with `resolution=1` (the default). Increase if selected genes are too similar to one another; decrease if the optimisation is slow to converge.
+
 ### Returns
 
 A tuple of three arrays:
