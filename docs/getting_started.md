@@ -24,4 +24,4 @@ An ESFS analysis generally follows this sequence:
 
 ## Datasets
 
-The datasets used in the example workflows can be downloaded from the Mendeley Data repository linked in the manuscript. A small test dataset for quick experimentation is provided in [`Claude_Dev_Folder/Claude_Test_Data.h5ad`](../Claude_Dev_Folder/Claude_Test_Data.h5ad).
+The datasets used in the example workflows can be downloaded from the [figshare repository](https://figshare.com/s/4e445e7fa03cc4ccd289).
