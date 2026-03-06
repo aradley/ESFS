@@ -41,7 +41,7 @@ Full documentation for all public functions.
 
 | Function | Description |
 |----------|-------------|
-| [`ES_CCF()`](api/algorithms.md#es_ccf) | Entropy Sorting Combinatorial Cluster Finder — identify combinatorial cluster marker genes |
+| [`ES_CCF()`](api/algorithms.md#es_ccf) | Entropy Sorting Combinatorial Cluster Finder — find the combination of clusters that maximises ESS correlation for each gene |
 | [`ES_FMG()`](api/algorithms.md#es_fmg) | Entropy Sorting Find Marker Genes — select N genes capturing maximally distinct expression patterns |
 
 ### [Plotting & Analysis](api/plotting.md)

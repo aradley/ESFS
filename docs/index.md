@@ -14,7 +14,7 @@ ESFS provides three main algorithms:
 | Algorithm | Full name | Purpose |
 |-----------|-----------|---------|
 | **ES-GSS** | Entropy Sorting Gene Set Selection | Pairwise ES metric calculation between all features |
-| **ES-CCF** | Entropy Sorting Combinatorial Cluster Finder | Identify combinatorial cluster marker genes |
+| **ES-CCF** | Entropy Sorting Combinatorial Cluster Finder | Find the combination of clusters that maximises ESS correlation for each gene |
 | **ES-FMG** | Entropy Sorting Find Marker Genes | Select N genes that capture maximally distinct expression patterns |
 
 ## Quick install

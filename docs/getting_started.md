@@ -10,7 +10,7 @@ An ESFS analysis generally follows this sequence:
 2. **Calculate ES metrics** — run ES-GSS (Entropy Sorting Gene Set Selection) with `parallel_calc_es_matrices()` to compute pairwise Entropy Sort Scores (ESS) and Error Potentials (EP) for all feature pairs
 3. **Rank genes** — use `ES_rank_genes()` to build a weighted gene network and rank genes by connectivity
 4. **Visualise** — embed top-ranked genes in UMAP space with `plot_top_ranked_genes_UMAP()` and generate per-cluster cell UMAPs with `get_gene_cluster_cell_UMAPs()`
-5. *(Optional)* **Identify cluster markers** — use ES-CCF (Entropy Sorting Combinatorial Cluster Finder) with `ES_CCF()` to find combinatorial marker genes for cell clusters
+5. *(Optional)* **Identify cluster markers** — use ES-CCF (Entropy Sorting Combinatorial Cluster Finder) with `ES_CCF()` to find, for each gene, the combination of clusters that maximises its ESS correlation
 6. *(Optional)* **Find marker gene sets** — use ES-FMG (Entropy Sorting Find Marker Genes) with `ES_FMG()` to select N genes that maximally capture distinct expression patterns
 
 ## Example workflows
