@@ -13,19 +13,6 @@ An ESFS analysis generally follows this sequence:
 5. *(Optional)* **Identify cluster markers** — use ES-CCF (Entropy Sorting Combinatorial Cluster Finder) with `ES_CCF()` to find, for each gene, the combination of clusters that maximises its ESS correlation
 6. *(Optional)* **Find marker gene sets** — use ES-FMG (Entropy Sorting Find Marker Genes) with `ES_FMG()` to select N genes that maximally capture distinct expression patterns
 
-```mermaid
-flowchart TD
-    A["create_scaled_matrix()"] --> B["parallel_calc_es_matrices()"]
-    B --> C["ES_rank_genes()"]
-    C --> D["plot_top_ranked_genes_UMAP()"]
-    C --> E["get_gene_cluster_cell_UMAPs()"]
-    E --> F["plot_gene_cluster_cell_UMAPs()"]
-    B --> G["ES_CCF() — optional"]
-    G --> H["ES_FMG() — optional"]
-    style G fill:#f5f5f5,stroke:#aaa
-    style H fill:#f5f5f5,stroke:#aaa
-```
-
 ## Example workflows
 
 | Workflow | Dataset | Description |

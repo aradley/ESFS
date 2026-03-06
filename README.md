@@ -20,11 +20,11 @@ Please see our [manuscript](https://www.biorxiv.org/content/10.64898/2026.01.26.
 
 Datasets for reproducing the example workflows are available at the [figshare repository](https://figshare.com/s/4e445e7fa03cc4ccd289).
 
+## Software overview
+
+![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
+
 > **Looking for the paper version?** Install v1.0.0 for exact reproducibility:
 > ```
 > pip install git+https://github.com/aradley/ESFS.git@v1.0.0
 > ```
-
-## Software overview
-
-![ESFS is comprised of 3 main algorithms - ES-GSS, ES-CCF and ES-FMG](Figure_1.png)
