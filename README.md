@@ -6,17 +6,55 @@
 
 ESFS is an Entropy Sorting based feature selection package primarily developed for feature selection and marker gene identification in single cell RNA sequencing datasets.
 
+## Quick start
+
+```python
+import esfs
+import scanpy as sc
+
+adata = sc.read_h5ad("my_data.h5ad")
+
+# Step 1: Scale and filter
+adata = esfs.create_scaled_matrix(adata)
+
+# Step 2: Calculate pairwise ES metrics (ES-GSS)
+adata = esfs.parallel_calc_es_matrices(adata)
+
+# Step 3: Rank genes and embed in UMAP space
+adata = esfs.ES_rank_genes(adata)
+adata = esfs.plot_top_ranked_genes_UMAP(adata, Num_Top_Ranked_Genes=3000)
+
+# Step 4: Generate cell UMAPs for each gene cluster — choose the most informative
+adata = esfs.get_gene_cluster_cell_UMAPs(adata)
+```
+
+To proceed to marker gene identification with ES-CCF and ES-FMG, see the [example workflows](docs/getting_started.md).
+
 ## Documentation
 
 Full documentation is available in the [`docs/`](docs/) folder:
 
 - [Installation](docs/installation.md)
 - [Getting Started](docs/getting_started.md)
+- [Understanding ESFS](docs/understanding_esfs.md)
 - [API Reference](docs/api/index.md)
 
-## Software overview
+## Why ESFS?
 
-Single-cell RNA sequencing (scRNA-seq) has transformed our ability to resolve cellular heterogeneity, but extracting meaningful signals remains challenging due to technical noise and batch effects. Most methods for denoising scRNA-seq data have focused on using latent representations such as principal component analysis and deep learning to prioritise biological signals. By contrast, despite its influence on downstream analyses, feature selection has received relatively limited attention, leading to widespread reliance on the comparatively simplistic strategy of highly variable gene selection. Here we present Entropy Sorting Feature Selection (ESFS), a modular, user-friendly framework that substantially improves the interpretability of scRNA-seq data. Notably, ESFS reveals complex expression dynamics that are obscured in latent representations. We demonstrate the utility of ESFS in diverse data: identifying coherent developmental programs across eight independent human embryo datasets without batch integration; resolving spatial gene expression in mouse colon missed by conventional analyses; disambiguating shared and tumour-specific microenvironments in glioblastoma; and disentangling spatial, temporal, and neurogenic programs in the developing mouse neural tube. Beyond delivering a powerful and user-friendly software that deepens insight into complex biological systems, our work establishes Entropy Sorting as a novel information theoretic for advanced data analysis methods.
+Standard scRNA-seq workflows rely on two steps that can introduce computational artefacts:
+
+- **Highly variable gene (HVG) selection** — ranks genes by dispersion alone, missing structured co-expression signals and biological patterns shared across gene sets
+- **PCA / batch integration** — compresses data into a latent space that can blend biologically distinct signals and distort true biological relationships
+
+ESFS takes a different approach: it works directly in gene expression space, using information theory to identify genes where biological signal outweighs technical noise — without requiring dimensionality reduction or batch correction.
+
+| Challenge | ESFS solution |
+|-----------|---------------|
+| HVG selection ranks genes by dispersion alone, missing co-expression structure | **ES-GSS** — selects genes based on pairwise information content across all gene pairs |
+| Fixing a clustering resolution forces a trade-off between over- and under-partitioning | **ES-CCF** — finds the optimal combination of clusters for each individual gene |
+| Differential expression analysis is tied to discrete cluster boundaries | **ES-FMG** — selects N marker genes capturing distinct, non-redundant expression profiles |
+
+For a deeper explanation of how each algorithm works and why, see [Understanding ESFS](docs/understanding_esfs.md).
 
 ### Helpful tips
 

@@ -25,3 +25,47 @@ An ESFS analysis generally follows this sequence:
 ## Datasets
 
 The datasets used in the example workflows can be downloaded from the [figshare repository](https://figshare.com/s/4e445e7fa03cc4ccd289).
+
+---
+
+## Parameter guide
+
+ESFS has three main parameters to tune. The defaults below are good starting points for most datasets.
+
+### `Num_Top_Ranked_Genes` — ES-GSS gene selection
+
+**Function:** `plot_top_ranked_genes_UMAP(adata, Num_Top_Ranked_Genes=3000)`
+
+This controls how many top-ranked genes are passed to the gene clustering step. After clustering, you select the gene cluster whose cell UMAP embedding best captures the biology of interest.
+
+| If your UMAP looks like... | Try... |
+|----------------------------|--------|
+| Unstructured, no clear groupings | Decrease — fewer, more tightly co-expressed genes |
+| Cells cluster primarily by batch/dataset | Decrease — remove noisier genes that carry technical signal |
+| Related cell types are merged or indistinct | Increase — include more genes to resolve finer structure |
+
+Start at **3000** and adjust in steps of ~500–1000. You are looking for embeddings that reveal distinct, biologically meaningful cell states with minimal batch separation.
+
+### `N` — number of ES-FMG marker genes
+
+**Function:** `ES_FMG(adata, N=200, secondary_features_label=...)`
+
+N determines how many marker genes to return. This is conceptually similar to choosing the number of PCA components — there is no single correct value, and it depends on the complexity of your dataset.
+
+- Start at **200–400** for typical datasets.
+- Increase if important populations seem to be missing from the selected gene set.
+- Decrease if many of the returned genes appear redundant or mark the same population.
+
+### `resolution` — ES-FMG redundancy penalisation
+
+**Function:** `ES_FMG(adata, N=200, resolution=1, secondary_features_label=...)`
+
+The `resolution` parameter (between 0 and 1) controls how strongly ES-FMG penalises overlap between the expression profiles of selected marker genes.
+
+| Value | Effect | Best for |
+|-------|--------|----------|
+| `resolution = 1` | Strongly penalises overlap — selects maximally distinct profiles | Datasets with discrete, non-overlapping cell types |
+| `resolution = 0.5–0.7` | Moderate penalisation — allows partial overlap | Mixed datasets with both discrete states and gradients |
+| `resolution < 0.5` | Minimal penalisation — captures graded or transitional expression | Developmental trajectories, spatial gradients |
+
+Start at **1** and decrease if you want to capture genes marking overlapping or transitional cell states (e.g. differentiating progenitors, spatial expression gradients).

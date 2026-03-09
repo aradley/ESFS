@@ -15,6 +15,17 @@ How to install ESFS and its optional GPU backends.
 
 ---
 
+## [Understanding ESFS](understanding_esfs.md)
+
+Why each algorithm works the way it does — bridging theory and practice.
+
+- [Why gene expression space?](understanding_esfs.md#why-gene-expression-space)
+- [ES-GSS: beyond highly variable genes](understanding_esfs.md#es-gss-beyond-highly-variable-genes)
+- [ES-CCF: why intentional over-clustering?](understanding_esfs.md#es-ccf-why-intentional-over-clustering)
+- [ES-FMG: reading your marker gene results](understanding_esfs.md#es-fmg-reading-your-marker-gene-results)
+
+---
+
 ## [Getting Started](getting_started.md)
 
 Worked example notebooks demonstrating the full ESFS pipeline on published single-cell datasets.

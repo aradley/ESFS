@@ -25,9 +25,13 @@ pip install git+https://github.com/aradley/ESFS.git@memory_optimised
 
 See [Installation](installation.md) for GPU acceleration options (NVIDIA/CUDA and Apple Silicon/MLX).
 
+## Understanding ESFS
+
+New to ESFS? The [Understanding ESFS](understanding_esfs.md) page explains the reasoning behind each algorithm — why gene expression space matters, how ES-GSS differs from HVG selection, why intentional over-clustering works, and how to read ES-FMG results.
+
 ## Getting started
 
-The best way to get started is to browse the [example workflows](getting_started.md) included in the repository.
+The best way to get started is to browse the [example workflows](getting_started.md) included in the repository. The [parameter guide](getting_started.md#parameter-guide) explains how to tune the three key parameters for your data.
 
 ## API reference
 
