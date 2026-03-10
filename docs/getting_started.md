@@ -6,7 +6,7 @@ The best way to learn ESFS is to follow the example workflows in the [`Example_W
 
 An ESFS analysis generally follows this sequence:
 
-1. **Preprocess** — scale and filter the expression matrix with `create_scaled_matrix()`
+1. **Preprocess** — scale/normalise and filter the expression matrix with `create_scaled_matrix()`
 2. **Calculate ES metrics** — run ES-GSS (Entropy Sorting Gene Set Selection) with `parallel_calc_es_matrices()` to compute pairwise Entropy Sort Scores (ESS) and Error Potentials (EP) for all feature pairs
 3. **Rank genes** — use `ES_rank_genes()` to build a weighted gene network and rank genes by connectivity
 4. **Visualise** — embed top-ranked genes in UMAP space with `plot_top_ranked_genes_UMAP()` and generate per-cluster cell UMAPs with `get_gene_cluster_cell_UMAPs()`
@@ -44,7 +44,7 @@ This controls how many top-ranked genes are passed to the gene clustering step. 
 | Cells cluster primarily by batch/dataset | Decrease — remove noisier genes that carry technical signal |
 | Related cell types are merged or indistinct | Increase — include more genes to resolve finer structure |
 
-Start at **3000** and adjust in steps of ~500–1000. You are looking for embeddings that reveal distinct, biologically meaningful cell states with minimal batch separation.
+Start at **3000** and adjust in steps of ~500–1000. You are looking for embeddings that reveal distinct, biologically meaningful cell states with minimal batch separation. See supplemental figure S14 from the manuscript for a visualised example.
 
 ### `N` — number of ES-FMG marker genes
 
@@ -52,7 +52,7 @@ Start at **3000** and adjust in steps of ~500–1000. You are looking for embedd
 
 N determines how many marker genes to return. This is conceptually similar to choosing the number of PCA components — there is no single correct value, and it depends on the complexity of your dataset.
 
-- Start at **200–400** for typical datasets.
+- Start at **100–300** for typical datasets.
 - Increase if important populations seem to be missing from the selected gene set.
 - Decrease if many of the returned genes appear redundant or mark the same population.
 

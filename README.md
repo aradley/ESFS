@@ -6,30 +6,6 @@
 
 ESFS is an Entropy Sorting based feature selection package primarily developed for feature selection and marker gene identification in single cell RNA sequencing datasets.
 
-## Quick start
-
-```python
-import esfs
-import scanpy as sc
-
-adata = sc.read_h5ad("my_data.h5ad")
-
-# Step 1: Scale and filter
-adata = esfs.create_scaled_matrix(adata)
-
-# Step 2: Calculate pairwise ES metrics (ES-GSS)
-adata = esfs.parallel_calc_es_matrices(adata)
-
-# Step 3: Rank genes and embed in UMAP space
-adata = esfs.ES_rank_genes(adata)
-adata = esfs.plot_top_ranked_genes_UMAP(adata, Num_Top_Ranked_Genes=3000)
-
-# Step 4: Generate cell UMAPs for each gene cluster — choose the most informative
-adata = esfs.get_gene_cluster_cell_UMAPs(adata)
-```
-
-To proceed to marker gene identification with ES-CCF and ES-FMG, see the [example workflows](docs/getting_started.md).
-
 ## Documentation
 
 Full documentation is available in the [`docs/`](docs/) folder:
@@ -61,7 +37,7 @@ For a deeper explanation of how each algorithm works and why, see [Understanding
 - ESFS is designed to be used on raw counts matrices or read depth normalised counts matrices. We recommend that users do not apply additional data transformations or regress out potential confounders before running ESFS.
 - The counts matrix you input to ESFS should have only basic quality control sample and gene filtering, such as removing cells with unusually low/high counts and genes expressed in only a small proportion of cells.
 - Do not apply highly variable gene selection before running ESFS — one of the primary purposes of ESFS is to identify a set of informative genes from the larger gene set.
-- The main parameter to change when identifying a set of genes informative of cell state is the `Num_Top_Ranked_Genes` parameter of the `plot_top_ranked_genes_UMAP()` function. We recommend starting at 3000 genes, plotting the cell UMAPs for the resulting gene clusters, and then trying values above or below 3000. You are looking for cell embeddings that improve data interpretability by revealing distinct cellular states with minimised batch effects.
+- The main parameter to change when identifying a set of genes informative of cell state is the `Num_Top_Ranked_Genes` parameter of the `plot_top_ranked_genes_UMAP()` function. We recommend starting at 3000 genes, plotting the cell UMAPs for the resulting gene clusters, and then trying values above or below 3000. You are looking for cell embeddings that improve data interpretability by revealing distinct cellular states with minimised batch effects. See supplemental figure S14 from the manuscript for a visualised example. 
 - Having identified an optimised gene set and high-resolution embedding, proceed to applying ES-CCF and ES-FMG to identify robust marker genes that characterise distinct and hierarchical cellular populations in your data.
 
 

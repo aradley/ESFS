@@ -1,6 +1,6 @@
 # Understanding ESFS
 
-This page explains the reasoning behind each ESFS algorithm — not just what it does, but *why* it works the way it does. If you are new to ESFS, reading this alongside the [example workflows](getting_started.md) will help you get the most out of your data.
+This page explains the reasoning behind each ESFS algorithm. If you are new to ESFS, reading this alongside the [example workflows](getting_started.md) will help you get the most out of your data.
 
 ---
 
@@ -9,7 +9,7 @@ This page explains the reasoning behind each ESFS algorithm — not just what it
 Most scRNA-seq analysis workflows apply dimensionality reduction (PCA) or batch integration before clustering and visualisation. These steps compress thousands of gene dimensions into a much smaller latent space, which makes the data easier to work with — but at a cost.
 
 **The problem with latent representations:**
-- Compression necessarily discards variation. If that variation is biological rather than technical, it is lost.
+- Compression can discard variation. If that variation is biological rather than technical, it is lost.
 - Batch integration algorithms are designed to remove inter-dataset differences, but biological differences between conditions or time points can be inadvertently removed alongside technical noise.
 - The result is a latent space that may look clean but can distort cell–cell relationships and obscure meaningful expression dynamics.
 
@@ -27,9 +27,9 @@ Highly variable gene (HVG) selection ranks genes by how much their expression va
 
 **How ES-GSS works:**
 
-ES-GSS takes a pairwise approach. For every pair of genes, it computes an Entropy Sort Score (ESS) — an information-theoretic measure of how strongly the expression of one gene predicts the ordering of another. Genes that are strongly and consistently predictive of many other genes are ranked highly. Genes whose variation is idiosyncratic or noisy tend to have weak, inconsistent ESS values and rank poorly.
+ES-GSS takes a pairwise approach. For every pair of genes, it computes an Entropy Sort Score (ESS) — an information-theoretic measure of how strongly the expression of one gene predicts the ordering of another, and an Error Potential (EP) - indicating whether the correlation between the 2 genes is significant. Genes that are strongly and consistently predictive of many other genes are ranked highly. Genes whose variation is idiosyncratic or noisy tend to have weak, inconsistent ESS values and rank poorly.
 
-The result is a weighted gene network, where edge weights reflect pairwise information content. Highly connected genes — those that co-vary with many others in a structured way — are the most informative of biological cell state. These are the genes ES-GSS selects.
+The result is a weighted gene network, where edge weights reflect pairwise information content. Highly connected genes — those that co-vary with many others in a structured way — are the more informative of biological cell state. These are the genes ES-GSS selects.
 
 **In practice:** after running ES-GSS, genes cluster into modules by co-expression pattern. You select the module whose cell UMAP embedding best captures the biological structure you are interested in (distinct cell types, developmental trajectories, spatial gradients, etc.). See the [parameter guide](getting_started.md#parameter-guide) for advice on choosing `Num_Top_Ranked_Genes`.
 
